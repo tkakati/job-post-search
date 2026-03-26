@@ -1,7 +1,7 @@
-# Job Post Discovery
+# Job Post Discovery [Demo](https://jobpostdiscovery.vercel.app/home?view=post-feed)
 
 AI-assisted hiring post discovery and ranking focused on real hiring signals, not generic job listings.
-
+ 
 ## What It Does
 
 - Runs a retrieval-plus-fresh discovery loop for relevant hiring posts.
