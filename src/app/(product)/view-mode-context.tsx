@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { useSearchParams } from "next/navigation";
 
 export type ProductViewMode = "post-feed" | "agent";
 
@@ -22,15 +21,10 @@ function getWindowViewMode(): ProductViewMode {
 }
 
 export function ProductViewModeProvider({ children }: { children: React.ReactNode }) {
-  const searchParams = useSearchParams();
-  const searchParamMode = parseViewMode(searchParams?.get("view"));
-  const [mode, setModeState] = React.useState<ProductViewMode>(searchParamMode);
+  const [mode, setModeState] = React.useState<ProductViewMode>(() => getWindowViewMode());
 
   React.useEffect(() => {
-    setModeState(searchParamMode);
-  }, [searchParamMode]);
-
-  React.useEffect(() => {
+    setModeState(getWindowViewMode());
     const onPopState = () => {
       setModeState(getWindowViewMode());
     };
