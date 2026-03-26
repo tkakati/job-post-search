@@ -347,7 +347,10 @@ const AGENT_APIFY_MAX_PAYLOAD_ATTEMPTS_PER_QUERY = 1;
 const POST_FEED_INITIAL_COUNT = 20;
 const POST_FEED_LOAD_MORE_COUNT = 20;
 const POST_FEED_STATUS_STORAGE_KEY = "job-post-discovery.post-feed-status.v1";
-const RUNNING_FEED_STATUS_COPY = "Showing retrieved matches while we find more posts… ETA ~2 min";
+const RUNNING_FEED_STATUS_WITH_RESULTS_COPY =
+  "Showing retrieved matches from database while we find more posts… ETA ~2 min";
+const RUNNING_FEED_STATUS_EMPTY_COPY =
+  "We are working on finding you relevant posts… ETA ~2 min";
 const DEFAULT_POST_FEED_FILTERS: PostFeedFilterState = {
   role: "",
   location: "",
@@ -3146,7 +3149,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                 {isRetrievedVisibleWhileRunning ? (
                   <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--intent-muted-border)] bg-[var(--brand-soft)] px-3 py-2 text-xs text-foreground">
                     <span className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--intent-primary)]" />
-                    <span>{RUNNING_FEED_STATUS_COPY}</span>
+                    <span>{RUNNING_FEED_STATUS_WITH_RESULTS_COPY}</span>
                   </div>
                 ) : null}
                 {!isRunActive && lastRunNewLeadCount != null ? (
@@ -3183,7 +3186,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                             style={{ animationDelay: "280ms" }}
                           />
                         </span>
-                        <span>{RUNNING_FEED_STATUS_COPY}</span>
+                        <span>{RUNNING_FEED_STATUS_EMPTY_COPY}</span>
                       </div>
                     </div>
                     {Array.from({ length: 4 }).map((_, idx) => (
