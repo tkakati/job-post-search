@@ -14,6 +14,10 @@ import { env } from "@/lib/env";
 
 export const runtime = "nodejs";
 
+function recursionLimitForMaxIterations(maxIterations: number) {
+  return Math.max(100, maxIterations * 40);
+}
+
 function graphFromLangGraphInternals() {
   const graph = createAgentGraph();
   const internal = graph.getGraph();
@@ -100,7 +104,10 @@ export async function POST(req: Request) {
       log: string;
     }> = [];
 
-    const stream = await graph.stream(initial, { streamMode: "updates" });
+    const stream = await graph.stream(initial, {
+      streamMode: "updates",
+      recursionLimit: recursionLimitForMaxIterations(initial.maxIterations),
+    });
     for await (const chunk of stream as AsyncIterable<Record<string, Record<string, unknown>>>) {
       const entries = Object.entries(chunk);
       for (const [node, patch] of entries) {

@@ -15,6 +15,10 @@ import { runWithDebugApiCallSink } from "@/lib/debug/api-call-sink";
 
 export const runtime = "nodejs";
 
+function recursionLimitForMaxIterations(maxIterations: number) {
+  return Math.max(100, maxIterations * 40);
+}
+
 function graphFromLangGraphInternals() {
   const graph = createAgentGraph();
   const internal = graph.getGraph();
@@ -138,7 +142,10 @@ export async function POST(req: Request) {
             ),
           );
         }, async () => {
-          const updates = await graph.stream(initial, { streamMode: "updates" });
+          const updates = await graph.stream(initial, {
+            streamMode: "updates",
+            recursionLimit: recursionLimitForMaxIterations(initial.maxIterations),
+          });
           for await (const chunk of updates as AsyncIterable<
             Record<string, Record<string, unknown>>
           >) {
