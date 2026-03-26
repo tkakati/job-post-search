@@ -17,7 +17,7 @@ export function ProductHeader() {
   const searchParams = useSearchParams();
 
   const activeView: "post-feed" | "agent" = React.useMemo(() => {
-    if (pathname === "/posts-feed") return "post-feed";
+    if (pathname === "/posts-feed" || pathname === "/home") return "post-feed";
     const view = searchParams?.get("view");
     return view === "agent" ? "agent" : "post-feed";
   }, [pathname, searchParams]);
@@ -71,7 +71,7 @@ export function ProductHeader() {
     >
       <div className="relative mx-auto flex w-full items-center px-4 py-2">
         <Link
-          href="/posts-feed?view=post-feed"
+          href="/home?view=post-feed"
           className="group flex items-center gap-2.5 leading-tight"
         >
           <Image
@@ -108,7 +108,7 @@ export function ProductHeader() {
               )}
             />
             <Link
-              href="/posts-feed?view=post-feed"
+              href="/home?view=post-feed"
               role="tab"
               aria-selected={activeView === "post-feed"}
               className={cn(
@@ -121,7 +121,7 @@ export function ProductHeader() {
               Post Feed
             </Link>
             <Link
-              href="/posts-feed?view=agent"
+              href="/home?view=agent"
               role="tab"
               aria-selected={activeView === "agent"}
               className={cn(

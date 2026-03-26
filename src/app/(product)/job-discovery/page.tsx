@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function JobDiscoveryPage() {
-  redirect("/posts-feed");
+  redirect("/home");
 }
