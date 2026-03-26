@@ -71,7 +71,7 @@ export function ProductHeader() {
     >
       <div className="relative mx-auto flex w-full items-center px-4 py-2">
         <Link
-          href="/debug?view=post-feed"
+          href="/posts-feed?view=post-feed"
           className="group flex items-center gap-2.5 leading-tight"
         >
           <Image
@@ -108,7 +108,7 @@ export function ProductHeader() {
               )}
             />
             <Link
-              href="/debug?view=post-feed"
+              href="/posts-feed?view=post-feed"
               role="tab"
               aria-selected={activeView === "post-feed"}
               className={cn(
@@ -121,7 +121,7 @@ export function ProductHeader() {
               Post Feed
             </Link>
             <Link
-              href="/debug?view=agent"
+              href="/posts-feed?view=agent"
               role="tab"
               aria-selected={activeView === "agent"}
               className={cn(
