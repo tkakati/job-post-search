@@ -19,7 +19,7 @@ export function ProductHeader() {
   const activeView: "post-feed" | "agent" = React.useMemo(() => {
     if (pathname === "/posts-feed") return "post-feed";
     const view = searchParams?.get("view");
-    return view === "post-feed" ? "post-feed" : "agent";
+    return view === "agent" ? "agent" : "post-feed";
   }, [pathname, searchParams]);
 
   React.useEffect(() => {

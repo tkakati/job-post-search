@@ -7,6 +7,6 @@ type DebugPageProps = {
 export default async function DebugPage({ searchParams }: DebugPageProps) {
   const params = await searchParams;
   const rawView = Array.isArray(params.view) ? params.view[0] : params.view;
-  const mode = rawView === "post-feed" ? "post-feed" : "agent";
+  const mode = rawView === "agent" ? "agent" : "post-feed";
   return <DebugTabClient mode={mode} />;
 }
