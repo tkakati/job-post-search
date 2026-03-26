@@ -12,6 +12,7 @@ import { DebugRunInputSchema, DebugRunOutputSchema } from "@/lib/schemas/api";
 import { FinalResponseOutputSchema } from "@/lib/schemas/contracts";
 import { env } from "@/lib/env";
 import { runWithDebugApiCallSink } from "@/lib/debug/api-call-sink";
+import { logger } from "@/lib/observability/logger";
 
 export const runtime = "nodejs";
 
@@ -45,6 +46,35 @@ function graphFromLangGraphInternals() {
 
 function line(value: unknown) {
   return `${JSON.stringify(value)}\n`;
+}
+
+function summarizeStreamRunError(error: unknown): { code: string; message: string } {
+  const raw =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : typeof error === "string"
+        ? error.toLowerCase()
+        : "";
+
+  if (raw.includes("database_url")) {
+    return {
+      code: "MISSING_DATABASE_URL",
+      message: "Search is temporarily unavailable due to server configuration.",
+    };
+  }
+
+  if (
+    raw.includes("apify") ||
+    raw.includes("profile_scraper") ||
+    raw.includes("provider_execute_failed")
+  ) {
+    return {
+      code: "POST_FETCH_FAILED",
+      message: "Couldn't fetch posts right now. Please retry.",
+    };
+  }
+
+  return { code: "DEBUG_RUN_FAILED", message: "Run failed. Please try again." };
 }
 
 export async function POST(req: Request) {
@@ -304,14 +334,17 @@ export async function POST(req: Request) {
           controller.enqueue(encoder.encode(line({ type: "final", payload })));
         });
       } catch (error) {
+        const summarizedError = summarizeStreamRunError(error);
+        logger.error("debug_run_stream_failed", {
+          error: error instanceof Error ? error.message : "unknown",
+          code: summarizedError.code,
+        });
         controller.enqueue(
           encoder.encode(
             line({
               type: "error",
-              message:
-                error instanceof Error
-                  ? `Failed to run debug flow: ${error.message}`
-                  : "Failed to run debug flow",
+              code: summarizedError.code,
+              message: summarizedError.message,
             }),
           ),
         );

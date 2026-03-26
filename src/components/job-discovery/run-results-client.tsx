@@ -14,10 +14,12 @@ import type { LeadCardViewModel } from "@/lib/types/contracts";
 import type { SearchRunEnvelope } from "@/lib/types/api";
 import { useLeadTracking } from "@/lib/client/use-lead-tracking";
 import { readApiErrorMessage } from "@/lib/client/api-error";
+import { summarizeUiError } from "@/lib/client/error-presentation";
 
 export function RunResultsClient({ runId }: { runId: number }) {
   const [run, setRun] = React.useState<SearchRunEnvelope | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [dismissedRunFailure, setDismissedRunFailure] = React.useState(false);
   const tracking = useLeadTracking(runId);
 
   const fetchRun = React.useCallback(async () => {
@@ -51,7 +53,12 @@ export function RunResultsClient({ runId }: { runId: number }) {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Could not load results.");
+          setError(
+            summarizeUiError({
+              source: "run",
+              rawMessage: err instanceof Error ? err.message : "Could not load results.",
+            }),
+          );
         }
       }
     }
@@ -63,13 +70,41 @@ export function RunResultsClient({ runId }: { runId: number }) {
     };
   }, [fetchRun]);
 
+  React.useEffect(() => {
+    if (run?.status === "failed") {
+      setDismissedRunFailure(false);
+    }
+  }, [run?.status, run?.error]);
+
+  const retryFetchRun = React.useCallback(async () => {
+    try {
+      setError(null);
+      await fetchRun();
+    } catch (err) {
+      setError(
+        summarizeUiError({
+          source: "run",
+          rawMessage: err instanceof Error ? err.message : "Could not load results.",
+        }),
+      );
+    }
+  }, [fetchRun]);
+
   async function handleLeadClick(lead: LeadCardViewModel) {
     void tracking.trackClicked(lead);
     void tracking.trackOpened(lead);
   }
 
   if (error) {
-    return <ErrorState message={error} />;
+    return (
+      <ErrorState
+        message={error}
+        onRetry={() => {
+          void retryFetchRun();
+        }}
+        onDismiss={() => setError(null)}
+      />
+    );
   }
 
   const status = run?.status ?? "running";
@@ -83,8 +118,17 @@ export function RunResultsClient({ runId }: { runId: number }) {
       <ProgressHeader runId={runId} status={status} />
       <RunStatusIndicator status={status} pollAfterMs={run?.pollAfterMs ?? null} />
 
-      {status === "failed" ? (
-        <ErrorState message={run?.error ?? "Search run failed."} />
+      {status === "failed" && !dismissedRunFailure ? (
+        <ErrorState
+          message={summarizeUiError({
+            source: "run",
+            rawMessage: run?.error ?? "Search run failed.",
+          })}
+          onRetry={() => {
+            void retryFetchRun();
+          }}
+          onDismiss={() => setDismissedRunFailure(true)}
+        />
       ) : null}
 
       {!result && (status === "queued" || status === "running") ? <ResultsLoading /> : null}
@@ -141,4 +185,3 @@ export function RunResultsClient({ runId }: { runId: number }) {
     </div>
   );
 }
-

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  dedupeRetrievedLeadsByRedundancy,
+  filterLeadRecordsByCountry,
   filterLeadsByRecency,
   routeAfterRetrieval,
   summarizeRetrievedLeads,
@@ -11,6 +13,77 @@ function daysAgo(days: number) {
 }
 
 describe("retrieval helper functions", () => {
+  it("filterLeadRecordsByCountry drops explicit mismatches and keeps unknown-country leads", () => {
+    const normalizedLeads = [
+      {
+        canonicalUrl: "https://example.com/ca",
+        identityKey: "ca",
+        sourceType: "mock",
+        titleOrRole: "Product Manager",
+        company: "A",
+        locations: [
+          {
+            raw: "Toronto, ON, Canada",
+            city: "Toronto",
+            state: "ON",
+            country: "Canada",
+            lat: null,
+            lon: null,
+          },
+        ],
+        rawLocationText: "Toronto, ON, Canada",
+        roleLocationKey: "pm::seattle",
+      },
+      {
+        canonicalUrl: "https://example.com/unknown",
+        identityKey: "unknown",
+        sourceType: "mock",
+        titleOrRole: "Product Manager",
+        company: "B",
+        locations: [
+          {
+            raw: "Remote",
+            city: "Remote",
+            state: null,
+            country: null,
+            lat: null,
+            lon: null,
+          },
+        ],
+        rawLocationText: "Remote",
+        roleLocationKey: "pm::seattle",
+      },
+      {
+        canonicalUrl: "https://example.com/us",
+        identityKey: "us",
+        sourceType: "mock",
+        titleOrRole: "Product Manager",
+        company: "C",
+        locations: [
+          {
+            raw: "Seattle, WA, USA",
+            city: "Seattle",
+            state: "WA",
+            country: "USA",
+            lat: null,
+            lon: null,
+          },
+        ],
+        rawLocationText: "Seattle, WA, USA",
+        roleLocationKey: "pm::seattle",
+      },
+    ];
+
+    const filtered = filterLeadRecordsByCountry({
+      leads: normalizedLeads as never,
+      userLocation: "Seattle",
+    });
+
+    expect(filtered.eligibleLeads.map((lead) => lead.identityKey)).toEqual(["unknown", "us"]);
+    expect(filtered.countryMismatchDroppedCount).toBe(1);
+    expect(filtered.countryUnknownCount).toBe(1);
+  });
+
   it("filterLeadsByRecency keeps only recent leads", () => {
     const leads = [
       {
@@ -278,6 +351,61 @@ describe("retrieval helper functions", () => {
     expect(summary.totalRetrievedCount).toBe(3);
     expect(summary.newUnseenCountForUser).toBe(2);
     expect(summary.retrievalDiagnostics.shownCountForUser).toBe(1);
+  });
+
+  it("dedupeRetrievedLeadsByRedundancy removes near-duplicate leads for same poster", () => {
+    const leads = [
+      {
+        canonicalUrl: "https://www.linkedin.com/posts/a",
+        identityKey: "a",
+        sourceType: "mock",
+        titleOrRole: "Senior Product Manager",
+        company: "Acme",
+        roleLocationKey: "senior product manager::seattle",
+        author: "Alex Smith",
+        fullText: "My team is hiring a senior product manager in Seattle and SF.",
+        postedAt: "2026-03-01T00:00:00.000Z",
+        fetchedAt: "2026-03-02T00:00:00.000Z",
+        sourceMetadataJson: {
+          postContext: {
+            primaryAuthorProfileUrl: "https://www.linkedin.com/in/alex-smith",
+            primaryAuthorName: "Alex Smith",
+          },
+          extraction: {
+            role: "Senior Product Manager",
+          },
+        },
+      },
+      {
+        canonicalUrl: "https://www.linkedin.com/posts/b",
+        identityKey: "b",
+        sourceType: "mock",
+        titleOrRole: "Senior Product Manager",
+        company: "Acme",
+        roleLocationKey: "senior product manager::seattle",
+        author: "Alex Smith",
+        fullText: "My team is hiring senior product manager in Seattle or SF.",
+        postedAt: "2026-03-03T00:00:00.000Z",
+        fetchedAt: "2026-03-03T00:00:00.000Z",
+        sourceMetadataJson: {
+          postContext: {
+            primaryAuthorProfileUrl: "https://www.linkedin.com/in/alex-smith",
+            primaryAuthorName: "Alex Smith",
+          },
+          extraction: {
+            role: "Senior Product Manager",
+          },
+        },
+      },
+    ];
+
+    const result = dedupeRetrievedLeadsByRedundancy({
+      leads: leads as never,
+    });
+
+    expect(result.redundantDroppedCount).toBe(1);
+    expect(result.dedupedLeads).toHaveLength(1);
+    expect(result.dedupedLeads[0]?.identityKey).toBe("b");
   });
 
   it("routeAfterRetrieval honors planner new-generation flag", () => {

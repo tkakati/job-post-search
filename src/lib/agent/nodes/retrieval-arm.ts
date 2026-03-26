@@ -8,6 +8,8 @@ import { leads, shownLeads } from "@/lib/db/schema";
 import { canonicalLeadIdentity } from "@/lib/utils/lead-identity";
 import { recencyPreferenceToDays } from "@/lib/utils/recency";
 import { coerceLeadLocations } from "@/lib/location/geo";
+import { isLeadCountryEligibleForUser } from "@/lib/location/country-eligibility";
+import { dedupeRedundantLeads } from "@/lib/leads/redundancy";
 
 type LeadDbRow = {
   id: number;
@@ -219,7 +221,7 @@ export function summarizeRetrievedLeads(input: {
   const unseen = input.leadsWithShown.filter((lead) => !lead.isShownForUser);
 
   return {
-    totalRetrievedCount: input.retrievedAfterRecencyFilter,
+    totalRetrievedCount: input.leadsWithShown.length,
     newUnseenCountForUser: unseen.length,
     retrievalDiagnostics: {
       recencyPreference: input.recencyPreference,
@@ -228,6 +230,75 @@ export function summarizeRetrievedLeads(input: {
       shownCountForUser: input.leadsWithShown.length - unseen.length,
       elapsedMs: input.elapsedMs,
     },
+  };
+}
+
+export function filterLeadRecordsByCountry(input: {
+  leads: LeadRecord[];
+  userLocation: string;
+}): {
+  eligibleLeads: LeadRecord[];
+  countryMismatchDroppedCount: number;
+  countryUnknownCount: number;
+} {
+  let countryMismatchDroppedCount = 0;
+  let countryUnknownCount = 0;
+  const eligibleLeads: LeadRecord[] = [];
+
+  for (const lead of input.leads) {
+    const result = isLeadCountryEligibleForUser({
+      userLocation: input.userLocation,
+      lead: {
+        locations: lead.locations,
+        rawLocationText: lead.rawLocationText ?? null,
+      },
+    });
+    if (!result.eligible && result.reason === "country_mismatch") {
+      countryMismatchDroppedCount += 1;
+      continue;
+    }
+    if (result.reason === "lead_country_unknown") {
+      countryUnknownCount += 1;
+    }
+    eligibleLeads.push(lead);
+  }
+
+  return {
+    eligibleLeads,
+    countryMismatchDroppedCount,
+    countryUnknownCount,
+  };
+}
+
+export function dedupeRetrievedLeadsByRedundancy(input: { leads: LeadRecord[] }): {
+  dedupedLeads: LeadRecord[];
+  redundantDroppedCount: number;
+} {
+  const deduped = dedupeRedundantLeads({
+    items: input.leads,
+    toComparable: (lead) => ({
+      sourceMetadataJson: lead.sourceMetadataJson ?? null,
+      author: lead.author ?? null,
+      titleOrRole: lead.titleOrRole ?? null,
+      fullText: lead.fullText ?? null,
+      snippet: lead.snippet ?? null,
+      postedAt: lead.postedAt ?? null,
+      fetchedAt: lead.fetchedAt ?? null,
+    }),
+    getRichnessScore: (lead) => {
+      let score = 0;
+      if (typeof lead.leadScore === "number" && Number.isFinite(lead.leadScore)) {
+        score += lead.leadScore * 100;
+      }
+      if (lead.fullText && lead.fullText.trim()) score += 4;
+      if (lead.snippet && lead.snippet.trim()) score += 2;
+      if (lead.company && lead.company.trim()) score += 1;
+      return score;
+    },
+  });
+  return {
+    dedupedLeads: deduped.deduped,
+    redundantDroppedCount: deduped.droppedCount,
   };
 }
 
@@ -256,9 +327,16 @@ export async function retrievalArmNode(state: AgentGraphState) {
     recencyPreference: state.recencyPreference,
   });
   const normalized = recencyFiltered.map(normalizeLead);
+  const countryFiltered = filterLeadRecordsByCountry({
+    leads: normalized,
+    userLocation: state.location,
+  });
+  const redundancyFiltered = dedupeRetrievedLeadsByRedundancy({
+    leads: countryFiltered.eligibleLeads,
+  });
   const leadsWithShown = await markLeadsShownVsUnseen({
     userSessionId: state.userSessionId,
-    normalizedLeads: normalized,
+    normalizedLeads: redundancyFiltered.dedupedLeads,
   });
 
   const elapsedMs = Date.now() - t0;
@@ -317,7 +395,7 @@ export async function retrievalArmNode(state: AgentGraphState) {
     },
     debugLog: appendDebug(
       state,
-      `retrieval_arm => phase=${retrievalPhase}, next=${next}`,
+      `retrieval_arm => phase=${retrievalPhase}, next=${next}, countryEligibleCount=${countryFiltered.eligibleLeads.length}, countryMismatchDroppedCount=${countryFiltered.countryMismatchDroppedCount}, countryUnknownCount=${countryFiltered.countryUnknownCount}, redundantDroppedCount=${redundancyFiltered.redundantDroppedCount}, retrievalAfterRedundancyDedupe=${redundancyFiltered.dedupedLeads.length}`,
     ),
   };
 }

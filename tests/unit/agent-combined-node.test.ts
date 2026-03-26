@@ -265,5 +265,155 @@ describe("combined_result node", () => {
       true,
     );
   });
-});
 
+  it("falls back to search normalized leads when extraction normalized leads are empty", async () => {
+    const state = createInitialAgentGraphState({
+      userSessionId: "s5",
+      role: "Role",
+      location: "Location",
+      recencyPreference: "past-month",
+      shownLeadIdentityKeys: [],
+    });
+
+    state.searchResults = {
+      roleLocationKey: state.roleLocationKey,
+      iterationNumber: 0,
+      rawSearchResults: [],
+      normalizedSearchResults: [
+        makeLead({ identityKey: "fresh-a", canonicalUrl: "https://x/fresh-a" }),
+        makeLead({ identityKey: "fresh-b", canonicalUrl: "https://x/fresh-b" }),
+      ],
+      persistedLeadIds: [],
+      queryPerformanceSummary: [],
+      diagnostics: {
+        provider: "test",
+        totalRawResults: 0,
+        totalNormalizedResults: 2,
+        dedupedResults: 2,
+        persistedLeadCount: 0,
+        elapsedMs: 1,
+      },
+      searchDiagnostics: {
+        apifyCallTime: 1,
+        totalFetched: 0,
+        totalKept: 2,
+        resultsFetched: 0,
+        resultsKept: 2,
+        dedupedCount: 0,
+      },
+      leads: [],
+      providerMetadataJson: {},
+    };
+
+    state.extractionResults = {
+      roleLocationKey: state.roleLocationKey,
+      iterationNumber: 0,
+      extractedLeads: [],
+      leads: [],
+      normalizedLeads: [],
+      extractionDiagnostics: {
+        postsProcessed: 2,
+        successfullyExtracted: 0,
+        skipped: 0,
+        averageConfidence: 0,
+        elapsedMs: 1,
+        batches: [],
+      },
+    };
+
+    const result = await combinedResultNode(state);
+    expect(result.combinedResults?.totalGeneratedCount).toBe(2);
+    expect(result.combinedResults?.newLeadsForUser.map((lead) => lead.identityKey)).toEqual([
+      "fresh-a",
+      "fresh-b",
+    ]);
+  });
+
+  it("drops explicit off-country leads while keeping unknown-country leads", async () => {
+    const state = createInitialAgentGraphState({
+      userSessionId: "s6",
+      role: "Role",
+      location: "Seattle",
+      recencyPreference: "past-month",
+      shownLeadIdentityKeys: [],
+    });
+
+    state.searchResults = {
+      roleLocationKey: state.roleLocationKey,
+      iterationNumber: 0,
+      rawSearchResults: [],
+      normalizedSearchResults: [
+        {
+          ...makeLead({ identityKey: "ca-lead", canonicalUrl: "https://x/ca" }),
+          locations: [
+            {
+              raw: "Toronto, ON, Canada",
+              city: "Toronto",
+              state: "ON",
+              country: "Canada",
+              lat: null,
+              lon: null,
+            },
+          ],
+          rawLocationText: "Toronto, ON, Canada",
+        },
+        {
+          ...makeLead({ identityKey: "unknown-lead", canonicalUrl: "https://x/unknown" }),
+          locations: [
+            {
+              raw: "Remote",
+              city: "Remote",
+              state: null,
+              country: null,
+              lat: null,
+              lon: null,
+            },
+          ],
+          rawLocationText: "Remote",
+        },
+        {
+          ...makeLead({ identityKey: "us-lead", canonicalUrl: "https://x/us" }),
+          locations: [
+            {
+              raw: "Seattle, WA, USA",
+              city: "Seattle",
+              state: "WA",
+              country: "USA",
+              lat: null,
+              lon: null,
+            },
+          ],
+          rawLocationText: "Seattle, WA, USA",
+        },
+      ],
+      persistedLeadIds: [],
+      queryPerformanceSummary: [],
+      diagnostics: {
+        provider: "test",
+        totalRawResults: 0,
+        totalNormalizedResults: 3,
+        dedupedResults: 3,
+        persistedLeadCount: 0,
+        elapsedMs: 1,
+      },
+      searchDiagnostics: {
+        apifyCallTime: 1,
+        totalFetched: 0,
+        totalKept: 3,
+        resultsFetched: 0,
+        resultsKept: 3,
+        dedupedCount: 0,
+      },
+      leads: [],
+      providerMetadataJson: {},
+    };
+
+    const result = await combinedResultNode(state);
+    expect(result.combinedResults?.newLeadsForUser.map((lead) => lead.identityKey)).toEqual([
+      "unknown-lead",
+      "us-lead",
+    ]);
+    expect(result.combinedResults?.totalGeneratedCount).toBe(2);
+  });
+
+});

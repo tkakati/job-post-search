@@ -12,6 +12,10 @@ import { parseRawLocationText } from "@/lib/location/geo";
 import { dbClient } from "@/lib/db";
 import { leads } from "@/lib/db/schema";
 import { inArray, or } from "drizzle-orm";
+import {
+  resolveLinkedinPostContext,
+  type LinkedinPostContext,
+} from "@/lib/linkedin/repost-context";
 
 const MAX_EXTRACTION_BATCH_SIZE = 5;
 const DEFAULT_EXTRACTION_BATCH_SIZE = 5;
@@ -28,6 +32,8 @@ type RawPost = {
   /** Search query text for this batch (for provenance / UI). */
   queryText: string;
   postUrl: string;
+  primaryAuthorName: string | null;
+  primaryAuthorProfileUrl: string | null;
   rawText: string;
   postedAt: string | null;
   metadata: Record<string, unknown>;
@@ -123,40 +129,20 @@ function extractRawPosts(state: AgentGraphState): RawPost[] {
   for (const batch of batches) {
     for (const item of batch.items) {
       const raw = item as Record<string, unknown>;
+      const storedPostContext = readStoredPostContext(raw);
+      const postContext = storedPostContext ?? resolveLinkedinPostContext(raw);
       const postUrl =
-        (typeof raw.postUrl === "string" && raw.postUrl) ||
-        (typeof raw.url === "string" && raw.url) ||
-        "";
+        postContext.primaryPostUrl ??
+        ((typeof raw.postUrl === "string" && raw.postUrl) ||
+          (typeof raw.url === "string" && raw.url) ||
+          "");
       if (!postUrl) continue;
-      const isRepost = raw.isRepost === true;
-      const resharedPost =
-        raw.resharedPost && typeof raw.resharedPost === "object"
-          ? (raw.resharedPost as Record<string, unknown>)
-          : null;
-      const resharedText =
-        resharedPost && typeof resharedPost.text === "string" ? resharedPost.text.trim() : "";
-      const reshareContext = typeof raw.text === "string" ? raw.text.trim() : "";
-      const fallbackText =
-        (typeof raw.text === "string" && raw.text.trim()) ||
-        (typeof raw.description === "string" && raw.description.trim()) ||
-        (typeof raw.title === "string" && raw.title.trim()) ||
-        "";
-
       const rawText =
-        isRepost && resharedText
-          ? [
-              "[POST TYPE: REPOST]",
-              "",
-              "[ORIGINAL POST]",
-              resharedText,
-              "",
-              "[RESHARED CONTEXT]",
-              reshareContext,
-            ]
-              .filter((line) => typeof line === "string")
-              .join("\n")
-              .trim()
-          : fallbackText;
+        postContext.primaryText ??
+        ((typeof raw.text === "string" && raw.text.trim()) ||
+          (typeof raw.description === "string" && raw.description.trim()) ||
+          (typeof raw.title === "string" && raw.title.trim()) ||
+          "");
       if (!rawText) continue;
 
       const postedAt =
@@ -170,9 +156,23 @@ function extractRawPosts(state: AgentGraphState): RawPost[] {
         sourceUrl: batch.sourceUrl,
         queryText: batch.queryText ?? "",
         postUrl,
+        primaryAuthorName: postContext.primaryAuthorName,
+        primaryAuthorProfileUrl: postContext.primaryAuthorProfileUrl,
         rawText,
         postedAt,
-        metadata: raw,
+        metadata: {
+          ...raw,
+          postContext: {
+            isRepost: postContext.isRepost,
+            primaryPostUrl: postContext.primaryPostUrl,
+            primaryAuthorName: postContext.primaryAuthorName,
+            primaryAuthorProfileUrl: postContext.primaryAuthorProfileUrl,
+            primaryText: postContext.primaryText,
+            reposterAuthorName: postContext.reposterAuthorName,
+            reposterAuthorProfileUrl: postContext.reposterAuthorProfileUrl,
+            reposterText: postContext.reposterText,
+          },
+        },
       });
     }
   }
@@ -247,6 +247,24 @@ function normalizeAuthorProfileForPrompt(raw: Record<string, unknown>): {
     about: normalizeNullableString(source.about),
     latestPositionTitle: normalizeNullableString(source.latestPositionTitle),
     latestPositionCompanyName: normalizeNullableString(source.latestPositionCompanyName),
+  };
+}
+
+function readStoredPostContext(raw: Record<string, unknown>): LinkedinPostContext | null {
+  const postContextRaw =
+    raw.postContext && typeof raw.postContext === "object"
+      ? (raw.postContext as Record<string, unknown>)
+      : null;
+  if (!postContextRaw) return null;
+  return {
+    isRepost: postContextRaw.isRepost === true,
+    primaryPostUrl: normalizeNullableString(postContextRaw.primaryPostUrl),
+    primaryAuthorName: normalizeNullableString(postContextRaw.primaryAuthorName),
+    primaryAuthorProfileUrl: normalizeNullableString(postContextRaw.primaryAuthorProfileUrl),
+    primaryText: normalizeNullableString(postContextRaw.primaryText),
+    reposterAuthorName: normalizeNullableString(postContextRaw.reposterAuthorName),
+    reposterAuthorProfileUrl: normalizeNullableString(postContextRaw.reposterAuthorProfileUrl),
+    reposterText: normalizeNullableString(postContextRaw.reposterText),
   };
 }
 
@@ -357,9 +375,23 @@ function toLeadRecord(input: {
     location: input.extracted.location,
   });
   const authorName =
-    toAuthorString(input.post.metadata.author) ?? toAuthorString(input.post.metadata.authorName);
-  const authorProfileUrl = authorProfileUrlFromRaw(input.post.metadata);
+    input.post.primaryAuthorName ??
+    toAuthorString(input.post.metadata.author) ??
+    toAuthorString(input.post.metadata.authorName);
+  const authorProfileUrl =
+    input.post.primaryAuthorProfileUrl ?? authorProfileUrlFromRaw(input.post.metadata);
   const authorProfile = normalizeAuthorProfileForPrompt(input.post.metadata);
+  const storedPostContext = readStoredPostContext(input.post.metadata);
+  const resolvedPostContext = storedPostContext ?? {
+    isRepost: input.post.metadata.isRepost === true,
+    primaryPostUrl: input.post.postUrl,
+    primaryAuthorName: authorName,
+    primaryAuthorProfileUrl: authorProfileUrl,
+    primaryText: input.post.rawText,
+    reposterAuthorName: toAuthorString(input.post.metadata.author),
+    reposterAuthorProfileUrl: authorProfileUrlFromRaw(input.post.metadata),
+    reposterText: normalizeNullableString(input.post.metadata.text),
+  };
   const parsedLocations = parseRawLocationText(input.extracted.location);
 
   return {
@@ -413,6 +445,16 @@ function toLeadRecord(input: {
       sourceQuery: input.post.queryText,
       authorProfileUrl,
       authorProfile,
+      postContext: {
+        isRepost: resolvedPostContext.isRepost,
+        primaryPostUrl: resolvedPostContext.primaryPostUrl,
+        primaryAuthorName: resolvedPostContext.primaryAuthorName,
+        primaryAuthorProfileUrl: resolvedPostContext.primaryAuthorProfileUrl,
+        primaryText: resolvedPostContext.primaryText,
+        reposterAuthorName: resolvedPostContext.reposterAuthorName,
+        reposterAuthorProfileUrl: resolvedPostContext.reposterAuthorProfileUrl,
+        reposterText: resolvedPostContext.reposterText,
+      },
     },
   };
 }

@@ -48,11 +48,12 @@ export function parseRawLocationText(rawLocationText: string | null | undefined)
   const deduped = Array.from(new Set(parts.map((x) => x.toLowerCase())));
   return deduped.map((normalized) => {
     const raw = parts.find((value) => value.toLowerCase() === normalized) ?? normalized;
+    const parsed = parseLocationParts(raw);
     return {
       raw,
-      city: raw,
-      state: null,
-      country: null,
+      city: parsed.city ?? raw,
+      state: parsed.state,
+      country: parsed.country,
       lat: null,
       lon: null,
     };

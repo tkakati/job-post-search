@@ -12,6 +12,7 @@ import {
 } from "@/lib/post-feed/formatters";
 import {
   POST_REVIEW_STATUS_LABELS,
+  POST_REVIEW_STATUS_UI,
   POST_REVIEW_STATUS_VALUES,
   type PostReviewStatus,
 } from "@/lib/post-feed/status";
@@ -45,6 +46,7 @@ export type PostCardProps = {
   isMessageGenerating?: boolean;
   messageDraft?: string | null;
   messageError?: string | null;
+  onDismissMessageError?: () => void;
   onCopyMessage?: () => void;
   isMessageCopied?: boolean;
   onOpenMessageDrawer?: () => void;
@@ -192,6 +194,7 @@ export function PostCard({
   isMessageGenerating,
   messageDraft,
   messageError,
+  onDismissMessageError,
   onCopyMessage,
   isMessageCopied,
   onOpenMessageDrawer,
@@ -241,6 +244,7 @@ export function PostCard({
   const matchTag = display.tags.find((tag) => tag.key === "match_strength");
   const recruiterTag = display.tags.find((tag) => tag.key === "author_type");
   const daysAgoLabel = React.useMemo(() => toDaysAgoLabel(postedAt), [postedAt]);
+  const statusUi = POST_REVIEW_STATUS_UI[status];
   const keepCardInView = React.useCallback(() => {
     const node = cardRef.current;
     if (!node) return;
@@ -455,21 +459,42 @@ export function PostCard({
 
         <div className="flex h-full min-w-[132px] flex-col items-start gap-2 lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
           <div>
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              STATUS
-            </p>
-            <select
-              aria-label="Post status"
-              value={status}
-              onChange={(event) => onStatusChange?.(event.target.value as PostReviewStatus)}
-              className="mt-1 h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground transition-colors duration-200 hover:border-[color-mix(in_srgb,var(--intent-primary)_24%,var(--input))] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--intent-primary)_32%,transparent)]"
-            >
-              {POST_REVIEW_STATUS_VALUES.map((value) => (
-                <option key={value} value={value}>
-                  {POST_REVIEW_STATUS_LABELS[value]}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-1">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                STATUS
+              </p>
+              <span className="group relative inline-flex">
+                <button
+                  type="button"
+                  aria-label="Status help"
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/70 text-[10px] text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--intent-primary)_32%,transparent)]"
+                >
+                  i
+                </button>
+                <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-1 hidden -translate-x-1/2 whitespace-nowrap rounded-md border border-border/70 bg-white px-2 py-1 text-[11px] text-foreground shadow-md group-hover:block group-focus-within:block dark:bg-popover dark:text-popover-foreground">
+                  Self tracking
+                </span>
+              </span>
+            </div>
+            <div className="mt-1 flex items-center gap-1.5">
+              <span
+                className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${statusUi.dotClassName}`}
+                aria-hidden="true"
+                title={statusUi.ariaLabel}
+              />
+              <select
+                aria-label="Post status"
+                value={status}
+                onChange={(event) => onStatusChange?.(event.target.value as PostReviewStatus)}
+                className={`h-8 rounded-md border px-2 text-xs transition-colors duration-200 hover:border-[color-mix(in_srgb,var(--intent-primary)_24%,var(--input))] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--intent-primary)_32%,transparent)] ${statusUi.selectClassName}`}
+              >
+                {POST_REVIEW_STATUS_VALUES.map((value) => (
+                  <option key={value} value={value}>
+                    {POST_REVIEW_STATUS_LABELS[value]}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
       </div>
@@ -508,7 +533,9 @@ export function PostCard({
               </p>
             ) : messageError ? (
               <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-2.5">
-                <p className="text-xs text-destructive">{messageError}</p>
+                <p className="truncate text-xs text-destructive" title={messageError}>
+                  {messageError}
+                </p>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     size="sm"
@@ -524,9 +551,15 @@ export function PostCard({
                     variant="ghost"
                     type="button"
                     className="h-7 px-2 text-xs"
-                    onClick={() => setIsMessagePanelOpen(false)}
+                    onClick={() => {
+                      if (onDismissMessageError) {
+                        onDismissMessageError();
+                        return;
+                      }
+                      setIsMessagePanelOpen(false);
+                    }}
                   >
-                    Close
+                    Dismiss
                   </Button>
                 </div>
               </div>

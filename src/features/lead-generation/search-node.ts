@@ -9,6 +9,7 @@ import type { ProviderRawResult } from "@/lib/search/provider";
 import { canonicalLeadIdentity, canonicalizeLeadUrl } from "@/lib/utils/lead-identity";
 import { parseRawLocationText } from "@/lib/location/geo";
 import { dbClient } from "@/lib/db";
+import { resolveLinkedinPostContext } from "@/lib/linkedin/repost-context";
 import {
   generatedQueries as generatedQueriesTable,
   leadSources,
@@ -51,6 +52,24 @@ function readString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function readPostContextFromMetadata(
+  metadata: unknown,
+): {
+  primaryAuthorName: string | null;
+  primaryAuthorProfileUrl: string | null;
+} | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const postContextRaw =
+    typeof (metadata as Record<string, unknown>).postContext === "object"
+      ? ((metadata as Record<string, unknown>).postContext as Record<string, unknown>)
+      : null;
+  if (!postContextRaw) return null;
+  return {
+    primaryAuthorName: readString(postContextRaw.primaryAuthorName),
+    primaryAuthorProfileUrl: readString(postContextRaw.primaryAuthorProfileUrl),
+  };
 }
 
 function readNestedString(value: unknown, path: string[]): string | null {
@@ -268,6 +287,12 @@ function buildProfileScraperEndpoint(
 function resolveOriginalAuthorProfileUrl(
   post: Record<string, unknown>,
 ): string | null {
+  const postContext = resolveLinkedinPostContext(post);
+  const contextProfileUrl = postContext.primaryAuthorProfileUrl;
+  if (contextProfileUrl && /linkedin\.com\/in\//i.test(contextProfileUrl)) {
+    return normalizeLinkedinProfileUrl(contextProfileUrl);
+  }
+
   const authorTypeRaw =
     readString(post.authorType) ??
     readString(post.author_type) ??
@@ -611,6 +636,7 @@ export function normalizeRawResultToLead(input: {
     location: input.raw.location,
   });
 
+  const postContext = readPostContextFromMetadata(input.raw.metadata);
   return {
     canonicalUrl: identity.canonicalUrl,
     identityKey: identity.identityKey,
@@ -624,7 +650,7 @@ export function normalizeRawResultToLead(input: {
     },
     employmentType: null,
     workMode: null,
-    author: input.raw.author ?? null,
+    author: postContext?.primaryAuthorName ?? input.raw.author ?? null,
     snippet: input.raw.snippet ?? null,
     fullText: input.raw.fullText ?? null,
     postedAt: input.raw.postedAt ?? null,
@@ -635,6 +661,11 @@ export function normalizeRawResultToLead(input: {
     roleLocationKey: input.roleLocationKey,
     sourceMetadataJson: {
       ...(input.raw.metadata ?? {}),
+      authorProfileUrl:
+        postContext?.primaryAuthorProfileUrl ??
+        (typeof input.raw.metadata?.authorProfileUrl === "string"
+          ? input.raw.metadata.authorProfileUrl
+          : null),
       extraction: staticExtractionFromRaw({ raw: input.raw }),
     },
   };
@@ -1010,17 +1041,24 @@ export async function runSearchNode(input: {
     const rawItems = run?.normalizedItems ?? [];
     const authorProfileByCanonicalUrl = new Map<string, Record<string, unknown>>();
     for (const rawPost of enrichedRawItems) {
+      const postContext = resolveLinkedinPostContext(rawPost);
+      const primaryPostUrl = postContext.primaryPostUrl;
       const rawPostUrl =
         (typeof rawPost["postUrl"] === "string" && rawPost["postUrl"].trim()) ||
         (typeof rawPost["url"] === "string" && rawPost["url"].trim()) ||
         "";
-      if (!rawPostUrl) continue;
       const profile =
         rawPost.authorProfile && typeof rawPost.authorProfile === "object"
           ? (rawPost.authorProfile as Record<string, unknown>)
           : null;
       if (!profile) continue;
-      authorProfileByCanonicalUrl.set(canonicalizeLeadUrl(rawPostUrl), profile);
+
+      const candidateUrls = [rawPostUrl, primaryPostUrl].filter(
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      );
+      for (const candidateUrl of candidateUrls) {
+        authorProfileByCanonicalUrl.set(canonicalizeLeadUrl(candidateUrl), profile);
+      }
     }
 
     rawSearchResults.push({
@@ -1039,6 +1077,7 @@ export async function runSearchNode(input: {
         company: raw.company,
         location: raw.location,
       });
+      const postContext = readPostContextFromMetadata(raw.metadata);
       return {
         canonicalUrl: identity.canonicalUrl,
         identityKey: identity.identityKey,
@@ -1052,7 +1091,7 @@ export async function runSearchNode(input: {
         },
         employmentType: null,
         workMode: null,
-        author: toAuthorString(raw.author),
+        author: postContext?.primaryAuthorName ?? toAuthorString(raw.author),
         snippet: raw.snippet ?? null,
         fullText: raw.fullText ?? null,
         postedAt: raw.postedAt ?? null,
@@ -1063,6 +1102,11 @@ export async function runSearchNode(input: {
         roleLocationKey: state.roleLocationKey,
         sourceMetadataJson: {
           ...(raw.metadata ?? {}),
+          authorProfileUrl:
+            postContext?.primaryAuthorProfileUrl ??
+            (typeof raw.metadata?.authorProfileUrl === "string"
+              ? raw.metadata.authorProfileUrl
+              : null),
           extraction: staticExtractionFromRaw({
             raw,
             authorProfile: authorProfileByCanonicalUrl.get(identity.canonicalUrl) ?? null,

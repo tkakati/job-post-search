@@ -2,6 +2,7 @@ import { formatLeadLocationDisplay } from "@/lib/location/display";
 import { primaryLeadLocationText } from "@/lib/location/geo";
 import type { LeadCardViewModel, LeadRecord } from "@/lib/types/contracts";
 import { leadDedupKey, leadRichnessScore } from "@/lib/utils/lead-dedupe";
+import { dedupeRedundantLeads } from "@/lib/leads/redundancy";
 
 type LeadSource = "retrieval" | "fresh_search";
 
@@ -11,6 +12,44 @@ type LeadProvenanceRow = {
 };
 
 export type LeadCardScope = "all" | "retrieval_only";
+
+function readTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readPostContext(
+  value: Record<string, unknown> | null | undefined,
+): {
+  primaryPostUrl: string | null;
+  primaryAuthorName: string | null;
+  primaryAuthorProfileUrl: string | null;
+} | null {
+  if (!value) return null;
+  const postContextRaw =
+    value.postContext && typeof value.postContext === "object"
+      ? (value.postContext as Record<string, unknown>)
+      : null;
+  if (!postContextRaw) return null;
+  return {
+    primaryPostUrl: readTrimmedString(postContextRaw.primaryPostUrl),
+    primaryAuthorName: readTrimmedString(postContextRaw.primaryAuthorName),
+    primaryAuthorProfileUrl: readTrimmedString(postContextRaw.primaryAuthorProfileUrl),
+  };
+}
+
+function readExtractionRoleFromSourceMetadata(
+  value: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!value) return null;
+  const extractionRaw =
+    value.extraction && typeof value.extraction === "object"
+      ? (value.extraction as Record<string, unknown>)
+      : null;
+  if (!extractionRaw) return null;
+  return readTrimmedString(extractionRaw.role);
+}
 
 function qualityBadgeForLead(lead: {
   leadScore?: number | null;
@@ -48,6 +87,43 @@ export function buildLeadCardsFromLeads(input: {
   const provenanceByIdentity = new Map(
     (input.leadProvenance ?? []).map((p) => [p.identityKey, p.sources]),
   );
+  const selectedEntries: Array<{ lead: LeadRecord; sources: Set<LeadSource> }> = [];
+  for (const lead of input.selectedLeads) {
+    const leadSources =
+      provenanceByIdentity.get(lead.identityKey) ?? (["fresh_search"] as const);
+    if (scope === "retrieval_only" && !leadSources.includes("retrieval")) {
+      continue;
+    }
+    selectedEntries.push({
+      lead,
+      sources: new Set(leadSources as LeadSource[]),
+    });
+  }
+  const dedupedByRedundancy = dedupeRedundantLeads({
+    items: selectedEntries,
+    toComparable: (entry) => ({
+      sourceMetadataJson: entry.lead.sourceMetadataJson ?? null,
+      author: entry.lead.author ?? null,
+      titleOrRole: entry.lead.titleOrRole ?? null,
+      fullText: entry.lead.fullText ?? null,
+      snippet: entry.lead.snippet ?? null,
+      postedAt: entry.lead.postedAt ?? null,
+      fetchedAt: entry.lead.fetchedAt ?? null,
+    }),
+    getRichnessScore: (entry) => leadRichnessScore(entry.lead),
+  });
+  const redundancyCollapsedEntries = dedupedByRedundancy.clusters.map((cluster) => {
+    const sources = new Set<LeadSource>();
+    for (const member of cluster.members) {
+      for (const source of member.sources) {
+        sources.add(source);
+      }
+    }
+    return {
+      lead: cluster.winner.lead,
+      sources,
+    };
+  });
 
   const dedupedSelectedByKey = new Map<
     string,
@@ -57,13 +133,7 @@ export function buildLeadCardsFromLeads(input: {
     }
   >();
 
-  for (const lead of input.selectedLeads) {
-    const leadSources =
-      provenanceByIdentity.get(lead.identityKey) ?? (["fresh_search"] as const);
-    if (scope === "retrieval_only" && !leadSources.includes("retrieval")) {
-      continue;
-    }
-
+  for (const { lead, sources } of redundancyCollapsedEntries) {
     const key = leadDedupKey({
       canonicalUrl: lead.canonicalUrl,
       titleOrRole: lead.titleOrRole,
@@ -74,12 +144,12 @@ export function buildLeadCardsFromLeads(input: {
     if (!existing) {
       dedupedSelectedByKey.set(key, {
         lead,
-        sources: new Set(leadSources as LeadSource[]),
+        sources: new Set(sources),
       });
       continue;
     }
 
-    for (const source of leadSources) {
+    for (const source of sources) {
       existing.sources.add(source as LeadSource);
     }
 
@@ -107,12 +177,21 @@ export function buildLeadCardsFromLeads(input: {
   return limitedSelected.map(({ lead, sources }) => {
     const sourceBadge = sourceBadgeForProvenance(Array.from(sources));
     const meta = lead.sourceMetadataJson as Record<string, unknown> | null | undefined;
+    const extractedRole = readExtractionRoleFromSourceMetadata(meta);
+    const displayJobTitle = extractedRole ?? readTrimmedString(lead.titleOrRole) ?? "Untitled role";
+    const postContext = readPostContext(meta);
     const authorProfileUrlRaw =
-      typeof meta?.authorProfileUrl === "string" ? meta.authorProfileUrl.trim() : "";
+      postContext?.primaryAuthorProfileUrl ??
+      (typeof meta?.authorProfileUrl === "string" ? meta.authorProfileUrl.trim() : "");
     const postAuthorUrl =
       authorProfileUrlRaw && /^https?:\/\//i.test(authorProfileUrlRaw)
         ? authorProfileUrlRaw
         : null;
+    const postUrlRaw =
+      postContext?.primaryPostUrl && /^https?:\/\//i.test(postContext.primaryPostUrl)
+        ? postContext.primaryPostUrl
+        : lead.canonicalUrl;
+    const postAuthor = postContext?.primaryAuthorName ?? lead.author ?? null;
     const leadScore =
       typeof (lead as { leadScore?: unknown }).leadScore === "number"
         ? ((lead as { leadScore: number }).leadScore ?? null)
@@ -133,14 +212,14 @@ export function buildLeadCardsFromLeads(input: {
       rawLocationText: lead.rawLocationText ?? null,
       canonicalUrl: lead.canonicalUrl,
       url: lead.canonicalUrl,
-      postUrl: lead.canonicalUrl,
+      postUrl: postUrlRaw,
       generatedQuery:
         typeof meta?.sourceQuery === "string" && meta.sourceQuery.trim()
           ? meta.sourceQuery.trim()
           : undefined,
-      postAuthor: lead.author ?? null,
+      postAuthor,
       postAuthorUrl,
-      jobTitle: lead.titleOrRole,
+      jobTitle: displayJobTitle,
       jobLocation: locationDisplay.display,
       score: leadScore,
       freshness: sourceBadge,
@@ -155,4 +234,3 @@ export function buildLeadCardsFromLeads(input: {
     };
   });
 }
-

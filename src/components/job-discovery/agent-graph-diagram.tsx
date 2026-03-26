@@ -332,6 +332,7 @@ export function AgentGraphDiagram({
   nodeDetails = {},
   onNodeClick,
   variant = "default",
+  highlightDataFlow = true,
 }: {
   activeNode: string | null;
   graph: GraphData;
@@ -340,6 +341,7 @@ export function AgentGraphDiagram({
   nodeDetails?: Record<string, NodeDetails>;
   onNodeClick?: (nodeId: string) => void;
   variant?: "default" | "data-flow";
+  highlightDataFlow?: boolean;
 }) {
   const svgId = React.useId().replace(/:/g, "");
   const [hoveredNode, setHoveredNode] = React.useState<string | null>(null);
@@ -512,23 +514,29 @@ export function AgentGraphDiagram({
             const dataFlowPoints = planningDataFlowPath(positions);
             if (!dataFlowPoints || dataFlowPoints.length < 2) return null;
             const dataFlowPathId = `${svgId}-data-flow-scoring-planning`;
+            const stroke = highlightDataFlow ? "#22d3ee" : "#64748b";
+            const labelFill = highlightDataFlow ? "#67e8f9" : "#cbd5e1";
             return (
               <g className="group">
                 <path
                   id={dataFlowPathId}
                   d={pathFromPoints(dataFlowPoints)}
                   fill="none"
-                  stroke="#22d3ee"
+                  stroke={stroke}
                   strokeWidth="1.4"
                   strokeDasharray="6 4"
                   markerEnd={`url(#${svgId}-arrow)`}
-                  className="drop-shadow-[0_0_4px_rgba(34,211,238,0.35)]"
+                  className={cn(
+                    highlightDataFlow
+                      ? "drop-shadow-[0_0_4px_rgba(34,211,238,0.35)]"
+                      : "opacity-70",
+                  )}
                 >
                   <title>scored leads (N, scores, signals)</title>
                 </path>
                 <text
                   fontSize="10"
-                  fill="#67e8f9"
+                  fill={labelFill}
                   dy="-4"
                   className="pointer-events-none opacity-100"
                   style={{ paintOrder: "stroke", stroke: "#0b1020", strokeWidth: 3 }}

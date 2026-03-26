@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import type { DebugRunOutput } from "@/lib/types/api";
 import { readApiErrorMessage } from "@/lib/client/api-error";
+import { summarizeUiError } from "@/lib/client/error-presentation";
 import { AgentGraphDiagram } from "@/components/job-discovery/agent-graph-diagram";
 import { Check, Copy, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
 import { formatLeadLocationDisplay } from "@/lib/location/display";
@@ -22,11 +23,13 @@ import {
   resolveDisplayCompany,
   resolveExtractedCompany,
 } from "@/lib/post-feed/company-resolution";
+import { isLeadCountryEligibleForUser } from "@/lib/location/country-eligibility";
 import {
   coercePostReviewStatus,
   isPostReviewStatus,
   type PostReviewStatus,
 } from "@/lib/post-feed/status";
+import { dedupeRedundantLeads } from "@/lib/leads/redundancy";
 
 const STAGES = [
   "planning_phase",
@@ -145,6 +148,9 @@ type JobPostAuthorProfile = {
 type PostFeedRow = {
   key: string;
   lead: FinalLeadCard;
+  displayRoleTitle: string;
+  displayPostAuthor: string | null;
+  displayPostAuthorUrl: string | null;
   authorProfile: JobPostAuthorProfile | undefined;
   freshness: "retrieved" | "fresh" | "both";
   sourceSignal: "retrieved" | "fresh" | "both" | null;
@@ -262,12 +268,63 @@ function extractWhyMatchedFromMetadata(
   return [];
 }
 
-function formatJsonForDebug(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
+function resolvePostContextFromSourceMetadata(
+  sourceMetadataJson: Record<string, unknown> | null,
+): {
+  primaryPostUrl: string | null;
+  primaryAuthorName: string | null;
+  primaryAuthorProfileUrl: string | null;
+} | null {
+  if (!sourceMetadataJson) return null;
+  const postContextRaw =
+    sourceMetadataJson.postContext && typeof sourceMetadataJson.postContext === "object"
+      ? (sourceMetadataJson.postContext as Record<string, unknown>)
+      : null;
+  if (!postContextRaw) return null;
+  return {
+    primaryPostUrl: readIdentityKey(postContextRaw.primaryPostUrl),
+    primaryAuthorName: readIdentityKey(postContextRaw.primaryAuthorName),
+    primaryAuthorProfileUrl: readIdentityKey(postContextRaw.primaryAuthorProfileUrl),
+  };
+}
+
+function readExtractionRoleFromSourceMetadata(
+  sourceMetadataJson: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!sourceMetadataJson || typeof sourceMetadataJson !== "object") return null;
+  const extractionRaw =
+    sourceMetadataJson.extraction && typeof sourceMetadataJson.extraction === "object"
+      ? (sourceMetadataJson.extraction as Record<string, unknown>)
+      : null;
+  if (!extractionRaw) return null;
+  return readIdentityKey(extractionRaw.role);
+}
+
+function resolveDisplayRoleTitle(input: {
+  lead: FinalLeadCard;
+  rankedLead?: {
+    titleOrRole?: string | null;
+    sourceMetadataJson?: Record<string, unknown> | null;
+  } | null;
+}): string {
+  const extractionRole = readExtractionRoleFromSourceMetadata(input.lead.sourceMetadataJson ?? null);
+  if (extractionRole) return extractionRole;
+
+  const leadJobTitle = readIdentityKey(input.lead.jobTitle);
+  if (leadJobTitle) return leadJobTitle;
+
+  const leadTitle = readIdentityKey(input.lead.title);
+  if (leadTitle) return leadTitle;
+
+  const rankedExtractionRole = readExtractionRoleFromSourceMetadata(
+    input.rankedLead?.sourceMetadataJson ?? null,
+  );
+  if (rankedExtractionRole) return rankedExtractionRole;
+
+  const rankedTitle = readIdentityKey(input.rankedLead?.titleOrRole ?? null);
+  if (rankedTitle) return rankedTitle;
+
+  return "Untitled role";
 }
 
 function toCsvCell(value: unknown): string {
@@ -308,6 +365,57 @@ function resolveLeadMergeKey(lead: FinalLeadCard): string | null {
   return null;
 }
 
+function resolveLeadFetchedAtFromSourceMetadata(lead: FinalLeadCard): string | null {
+  const sourceMetadata =
+    lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
+      ? (lead.sourceMetadataJson as Record<string, unknown>)
+      : null;
+  if (!sourceMetadata) return null;
+  const directFetchedAt = readIdentityKey(sourceMetadata.fetchedAt);
+  if (directFetchedAt) return directFetchedAt;
+  const leadRaw =
+    sourceMetadata.lead && typeof sourceMetadata.lead === "object"
+      ? (sourceMetadata.lead as Record<string, unknown>)
+      : null;
+  return readIdentityKey(leadRaw?.fetchedAt);
+}
+
+function dedupeFinalLeadCardsByRedundancy(leads: FinalLeadCard[]): {
+  deduped: FinalLeadCard[];
+  droppedCount: number;
+} {
+  const deduped = dedupeRedundantLeads({
+    items: leads,
+    toComparable: (lead) => ({
+      sourceMetadataJson: lead.sourceMetadataJson ?? null,
+      postAuthor: lead.postAuthor ?? null,
+      jobTitle: lead.jobTitle ?? null,
+      titleOrRole: lead.title ?? null,
+      fullText:
+        lead.sourceMetadataJson &&
+        typeof lead.sourceMetadataJson === "object" &&
+        typeof lead.sourceMetadataJson.fullText === "string"
+          ? lead.sourceMetadataJson.fullText
+          : null,
+      snippet: lead.snippet ?? null,
+      postedAt: lead.postedAt ?? null,
+      fetchedAt: resolveLeadFetchedAtFromSourceMetadata(lead),
+    }),
+    getRichnessScore: (lead) => {
+      let score = 0;
+      if (typeof lead.score === "number" && Number.isFinite(lead.score)) score += lead.score * 100;
+      if (typeof lead.snippet === "string" && lead.snippet.trim()) score += 2;
+      if (typeof lead.jobTitle === "string" && lead.jobTitle.trim()) score += 2;
+      if (lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object") score += 1;
+      return score;
+    },
+  });
+  return {
+    deduped: deduped.deduped,
+    droppedCount: deduped.droppedCount,
+  };
+}
+
 function extractShownIdentityKeys(leads: FinalLeadCard[]): string[] {
   return Array.from(
     new Set(
@@ -323,23 +431,27 @@ function mergeNetNewLeads(
   existing: FinalLeadCard[],
   incoming: FinalLeadCard[],
 ): { merged: FinalLeadCard[]; addedCount: number } {
-  if (incoming.length === 0) return { merged: existing, addedCount: 0 };
+  const normalizedExisting = dedupeFinalLeadCardsByRedundancy(existing).deduped;
+  if (incoming.length === 0) return { merged: normalizedExisting, addedCount: 0 };
 
-  const merged = [...existing];
+  const merged = [...normalizedExisting];
   const seenKeys = new Set(
-    existing.map((lead) => resolveLeadMergeKey(lead)).filter((key): key is string => Boolean(key)),
+    normalizedExisting
+      .map((lead) => resolveLeadMergeKey(lead))
+      .filter((key): key is string => Boolean(key)),
   );
-  let addedCount = 0;
 
   for (const lead of incoming) {
     const mergeKey = resolveLeadMergeKey(lead);
     if (mergeKey && seenKeys.has(mergeKey)) continue;
     merged.push(lead);
-    addedCount += 1;
     if (mergeKey) seenKeys.add(mergeKey);
   }
 
-  return { merged, addedCount };
+  const mergedAfterRedundancy = dedupeFinalLeadCardsByRedundancy(merged).deduped;
+  const addedCount = Math.max(0, mergedAfterRedundancy.length - normalizedExisting.length);
+
+  return { merged: mergedAfterRedundancy, addedCount };
 }
 
 const AGENT_APIFY_MAX_ITEMS_PER_CALL = 10;
@@ -399,6 +511,26 @@ function normalizeEmploymentTypeValue(value: unknown): Exclude<PostFeedEmploymen
   return "unknown";
 }
 
+function normalizeStreamError(error: unknown): { message: string; code: string | null } {
+  if (error && typeof error === "object") {
+    const maybeMessage =
+      "message" in error && typeof (error as { message?: unknown }).message === "string"
+        ? ((error as { message: string }).message ?? "").trim()
+        : "";
+    const maybeCode =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? ((error as { code: string }).code ?? "").trim()
+        : "";
+    if (maybeMessage) {
+      return { message: maybeMessage, code: maybeCode || null };
+    }
+  }
+  if (error instanceof Error) {
+    return { message: error.message, code: null };
+  }
+  return { message: "Agent run failed", code: null };
+}
+
 function normalizeWorkModeValue(value: unknown): Exclude<PostFeedWorkModeFilter, "any"> {
   const normalized = normalizeLowerText(value).replace(/\s+/g, "-");
   if (normalized === "onsite") return "onsite";
@@ -454,7 +586,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   } | null>(null);
   const [isGeneratingNodewiseExplanation, setIsGeneratingNodewiseExplanation] =
     React.useState(false);
-  const [selectedGraphNode, setSelectedGraphNode] = React.useState<string | null>(null);
+  const [isGraphPlaybackEngaged, setIsGraphPlaybackEngaged] = React.useState(false);
   const [expandedScoreRows, setExpandedScoreRows] = React.useState<Record<string, boolean>>({});
   const [expandedJobPostRows, setExpandedJobPostRows] = React.useState<Record<string, boolean>>({});
   const [postFeedDraftFilters, setPostFeedDraftFilters] =
@@ -512,22 +644,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     }>
   >([]);
   const [liveApiCalls, setLiveApiCalls] = React.useState<LiveApiCallRow[]>([]);
-  const [error, setError] = React.useState<string | null>(null);
-  const hasRuntimeGraph = !!result?.graph?.nodes?.length && !!result?.graph?.edges?.length;
+  const [runErrorSummary, setRunErrorSummary] = React.useState<string | null>(null);
   const graphSectionRef = React.useRef<HTMLDivElement | null>(null);
   const postFeedSectionRef = React.useRef<HTMLDivElement | null>(null);
-  const apiCallsScrollRef = React.useRef<HTMLDivElement | null>(null);
   const runSearchKeyRef = React.useRef<string>("");
   const runBaseStickyCountRef = React.useRef<number>(0);
   const runStartedWithExistingFeedRef = React.useRef<boolean>(false);
   const runAccumulatedAddedCountRef = React.useRef<number>(0);
   const resumeInputRef = React.useRef<HTMLInputElement | null>(null);
-
-  React.useEffect(() => {
-    const el = apiCallsScrollRef.current;
-    if (!el || liveApiCalls.length === 0) return;
-    el.scrollTop = el.scrollHeight;
-  }, [liveApiCalls]);
 
   React.useEffect(() => {
     if (isRunning || lastRunNewLeadCount == null) return;
@@ -640,7 +764,12 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         setResumeRawText(null);
         setResumeSenderName(null);
         setResumeParseStatus("error");
-        setResumeParseError(error instanceof Error ? error.message : "Failed to parse resume.");
+        setResumeParseError(
+          summarizeUiError({
+            source: "resume_parse",
+            rawMessage: error instanceof Error ? error.message : "Failed to parse resume.",
+          }),
+        );
       }
     },
     [],
@@ -1324,6 +1453,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
           ? lead.sourceMetadataJson
           : null;
+      const postContext = resolvePostContextFromSourceMetadata(sourceMetadata);
       const extraction =
         sourceMetadata?.extraction && typeof sourceMetadata.extraction === "object"
           ? (sourceMetadata.extraction as Record<string, unknown>)
@@ -1348,12 +1478,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           (typeof extraction?.authorCountry === "string" ? extraction.authorCountry : null),
         jobCountries: extractJobCountries(locationDisplay.parsedLocations),
       });
+      const displayPostUrl =
+        toHttpUrlOrNull(postContext?.primaryPostUrl) ??
+        toHttpUrlOrNull(lead.postUrl) ??
+        toHttpUrlOrNull(lead.canonicalUrl);
+      const displayPostAuthor = postContext?.primaryAuthorName ?? lead.postAuthor ?? null;
+      const displayPostAuthorUrl =
+        toHttpUrlOrNull(postContext?.primaryAuthorProfileUrl) ??
+        toHttpUrlOrNull(lead.postAuthorUrl);
+      const displayRoleTitle = resolveDisplayRoleTitle({ lead });
       return [
         String(idx + 1),
         lead.generatedQuery ?? "n/a",
-        lead.postUrl ?? lead.canonicalUrl,
-        lead.postAuthor ?? "Unknown",
-        lead.postAuthorUrl ?? "N/A",
+        displayPostUrl ?? lead.canonicalUrl,
+        displayPostAuthor ?? "Unknown",
+        displayPostAuthorUrl ?? "N/A",
         authorProfile?.email_ID ?? "N/A",
         locationDisplay.display,
         companyResolution.displayCompanyText,
@@ -1366,7 +1505,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         authorProfile?.companyName ?? "N/A",
         authorProfile?.headline ?? "N/A",
         authorProfile?.about ?? "N/A",
-        lead.jobTitle ?? lead.title ?? "N/A",
+        displayRoleTitle,
         lead.score != null ? lead.score.toFixed(3) : "unscored",
         lead.freshness ?? lead.sourceBadge ?? "fresh",
       ];
@@ -1444,6 +1583,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       lead: FinalLeadCard,
       rowIndex: number,
       options?: {
+        rankedLead?: {
+          titleOrRole?: string | null;
+          sourceMetadataJson?: Record<string, unknown> | null;
+        } | null;
         rankedScore?: number | null;
         rankedBreakdown?: {
           roleMatchScore?: number;
@@ -1458,6 +1601,11 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       const scoredLead = resolveScoredLeadForRow(lead);
       const authorProfile = resolveAuthorProfileForLead(lead);
       const sourceMetadata = options?.sourceMetadataJson ?? lead.sourceMetadataJson ?? null;
+      const displayRoleTitle = resolveDisplayRoleTitle({
+        lead,
+        rankedLead: options?.rankedLead ?? null,
+      });
+      const postContext = resolvePostContextFromSourceMetadata(sourceMetadata);
       const sourceSignal =
         lead.freshness ??
         lead.sourceBadge ??
@@ -1560,18 +1708,22 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       });
       const isNew = lead.isNewForUser === true || lead.newBadge === "new";
       const whyMatched = extractWhyMatchedFromMetadata(sourceMetadata);
-      const viewPostUrl =
-        toHttpUrlOrNull(lead.canonicalUrl) ??
-        toHttpUrlOrNull(lead.postUrl) ??
-        toHttpUrlOrNull(sourceMetadata?.sourceUrl);
-      const authorUrl =
+      const displayPostAuthor = postContext?.primaryAuthorName ?? lead.postAuthor ?? null;
+      const displayPostAuthorUrl =
+        toHttpUrlOrNull(postContext?.primaryAuthorProfileUrl) ??
         toHttpUrlOrNull(lead.postAuthorUrl) ??
         toHttpUrlOrNull(sourceMetadata?.postAuthorUrl) ??
         toHttpUrlOrNull(sourceMetadata?.authorUrl);
+      const viewPostUrl =
+        toHttpUrlOrNull(postContext?.primaryPostUrl) ??
+        toHttpUrlOrNull(lead.canonicalUrl) ??
+        toHttpUrlOrNull(lead.postUrl) ??
+        toHttpUrlOrNull(sourceMetadata?.sourceUrl);
+      const authorUrl = displayPostAuthorUrl;
       const postedByCompanyFromUrl = Boolean(
         authorUrl && /linkedin\.com\/company\//i.test(authorUrl),
       );
-      const authorNameNormalized = normalizeLowerText(lead.postAuthor);
+      const authorNameNormalized = normalizeLowerText(displayPostAuthor);
       const companyNameNormalized = normalizeLowerText(extractedCompany);
       const postedByCompanyByName = Boolean(
         authorNameNormalized &&
@@ -1617,12 +1769,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           : null,
       ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
       const searchText = [
+        displayRoleTitle,
         lead.jobTitle,
         lead.title,
         extractedCompany,
         companyResolution.displayCompanyText,
         lead.generatedQuery,
-        lead.postAuthor,
+        displayPostAuthor,
         lead.snippet,
         authorProfile?.companyName,
         locationDisplay.full ?? locationDisplay.display,
@@ -1634,6 +1787,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       return {
         key: `${lead.leadId ?? rowIndex}-${lead.canonicalUrl}-feed`,
         lead,
+        displayRoleTitle,
+        displayPostAuthor,
+        displayPostAuthorUrl,
         authorProfile,
         freshness,
         sourceSignal,
@@ -1730,6 +1886,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
         rows.push(
           createRow(lead, index, {
+            rankedLead: {
+              titleOrRole: rankedLead.titleOrRole ?? null,
+              sourceMetadataJson: rankedLead.sourceMetadataJson ?? null,
+            },
             rankedScore: typeof rankedLead.leadScore === "number" ? rankedLead.leadScore : null,
             rankedBreakdown: rankedLead.scoreBreakdown ?? null,
             sourceMetadataJson: rankedLead.sourceMetadataJson ?? null,
@@ -1758,7 +1918,31 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       seenCanonicalUrls.add(canonicalLookup);
     }
 
-    return rows;
+    const dedupedRows = dedupeRedundantLeads({
+      items: rows,
+      toComparable: (row) => ({
+        sourceMetadataJson: row.lead.sourceMetadataJson ?? null,
+        postAuthor: row.displayPostAuthor ?? row.lead.postAuthor ?? null,
+        jobTitle: row.displayRoleTitle,
+        titleOrRole: row.lead.title ?? row.lead.jobTitle ?? null,
+        fullText: row.fullText,
+        snippet: row.lead.snippet ?? null,
+        postedAt: row.lead.postedAt ?? null,
+        fetchedAt: resolveLeadFetchedAtFromSourceMetadata(row.lead),
+      }),
+      getRichnessScore: (row) => {
+        let score = 0;
+        if (typeof row.score === "number" && Number.isFinite(row.score)) score += row.score * 100;
+        if (typeof row.lead.snippet === "string" && row.lead.snippet.trim()) score += 2;
+        if (typeof row.fullText === "string" && row.fullText.trim()) score += 3;
+        if (row.lead.sourceMetadataJson && typeof row.lead.sourceMetadataJson === "object") {
+          score += 1;
+        }
+        return score;
+      },
+    });
+
+    return dedupedRows.deduped;
   }, [postFeedLeads, rankedScoredLeads, resolveAuthorProfileForLead, resolveScoredLeadForRow]);
   const postFeedRowsByKey = React.useMemo(
     () => new Map(postFeedRows.map((row) => [row.key, row])),
@@ -1838,9 +2022,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     const nowMs = Date.now();
 
     return postFeedRows.filter((row) => {
+      const countryEligibility = isLeadCountryEligibleForUser({
+        userLocation: location,
+        lead: {
+          locations:
+            Array.isArray(row.lead.locations) && row.lead.locations.length > 0
+              ? row.lead.locations
+              : row.locationDisplay.parsedLocations,
+          rawLocationText: row.lead.rawLocationText ?? row.locationDisplay.full ?? null,
+        },
+      });
+      if (!countryEligibility.eligible) return false;
+
       if (roleTokens.length > 0) {
         const roleText = normalizeLowerText(
-          row.lead.jobTitle ?? row.lead.title ?? row.lead.company ?? null,
+          row.displayRoleTitle ?? row.lead.jobTitle ?? row.lead.title ?? row.lead.company ?? null,
         );
         const roleMatches = roleTokens.every((token) => roleText.includes(token));
         if (!roleMatches) return false;
@@ -1904,7 +2100,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       if (postFeedAppliedFilters.newOnly === "new_only" && !row.isNew) return false;
       return true;
     });
-  }, [postFeedRows, postFeedAppliedFilters, postFeedStatuses]);
+  }, [location, postFeedRows, postFeedAppliedFilters, postFeedStatuses]);
 
   const sortedPostFeedRows = React.useMemo(() => {
     if (postFeedSortMode === "best_match") return filteredPostFeedRows;
@@ -2000,13 +2196,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           headers: { "content-type": "application/json" },
           credentials: "same-origin",
           body: JSON.stringify({
-            roleTitle: row.lead.jobTitle ?? row.lead.title ?? "Unknown role",
+            roleTitle: row.displayRoleTitle,
             company: row.resolvedCompanyRaw ?? null,
             locations,
             workMode: row.lead.workMode ?? null,
             employmentType: row.lead.employmentType ?? null,
             postText: row.fullText ?? row.lead.snippet ?? null,
-            authorName: row.lead.postAuthor ?? null,
+            authorName: row.displayPostAuthor ?? null,
             authorHeadline: row.authorProfile?.headline ?? null,
             authorCompany: row.authorProfile?.companyName ?? null,
             authorType: row.authorTypeLabel === "Unknown" ? null : row.authorTypeLabel,
@@ -2039,7 +2235,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
         setGeneratedMessagesByRow((prev) => ({ ...prev, [row.key]: message }));
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to generate message";
+        const message = summarizeUiError({
+          source: "message_generation",
+          rawMessage: err instanceof Error ? err.message : "Failed to generate message",
+        });
         setMessageErrorByRow((prev) => ({ ...prev, [row.key]: message }));
       } finally {
         setMessageGeneratingByRow((prev) => ({ ...prev, [row.key]: false }));
@@ -2141,6 +2340,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     setPlaybackIndex(0);
     setCurrentStep(0);
     setIsPlaybackPlaying(false);
+    setIsGraphPlaybackEngaged(false);
   }, [result]);
 
   React.useEffect(() => {
@@ -2159,10 +2359,20 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     return () => window.clearInterval(timer);
   }, [isPlaybackPlaying, playbackNodes, isRunning]);
 
+  const graphPlaybackNode =
+    playbackNodes[Math.min(playbackIndex, Math.max(playbackNodes.length - 1, 0))] ?? null;
+  const isPostRunNeutralGraph = !isRunning && !isGraphPlaybackEngaged;
   const graphActiveNode = isRunning
     ? activeStage
-    : (playbackNodes[Math.min(playbackIndex, Math.max(playbackNodes.length - 1, 0))] ?? null);
+    : isGraphPlaybackEngaged
+      ? graphPlaybackNode
+      : null;
   const hasRunData = startedSequence.length > 0;
+  const displayedGraphStep = isPostRunNeutralGraph
+    ? 0
+    : startedSequence.length
+      ? Math.min(currentStep + 1, startedSequence.length)
+      : 0;
   const iterationsAvailable = React.useMemo(
     () => Array.from(new Set(liveLogEntries.map((e) => e.iteration))).sort((a, b) => a - b),
     [liveLogEntries],
@@ -2176,11 +2386,6 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       new Set(liveLogEntries.filter((e) => e.iteration === selectedIter).map((e) => e.node)),
     );
   }, [liveLogEntries, selectedLogIteration]);
-  const filteredLiveLogs = React.useMemo(() => {
-    if (!selectedLogIteration || !selectedLogNode) return [];
-    const selectedIter = Number(selectedLogIteration);
-    return liveLogEntries.filter((e) => e.iteration === selectedIter && e.node === selectedLogNode);
-  }, [liveLogEntries, selectedLogIteration, selectedLogNode]);
   const latencyTotalsByIteration = React.useMemo(() => {
     const totals = new Map<number, number>();
     for (const row of iterationTimingRows) {
@@ -2205,10 +2410,25 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   }, [iterationTimingRows]);
 
   React.useEffect(() => {
-    if (!selectedLogIteration) return;
-    if (selectedLogNode && nodesForSelectedIteration.includes(selectedLogNode)) return;
-    setSelectedLogNode("");
-  }, [selectedLogIteration, selectedLogNode, nodesForSelectedIteration]);
+    if (!selectedLogNode) return;
+
+    const selectedNodeIterations = liveLogEntries
+      .filter((entry) => entry.node === selectedLogNode)
+      .map((entry) => entry.iteration);
+    if (selectedNodeIterations.length === 0) return;
+
+    const uniqueIterations = Array.from(new Set(selectedNodeIterations)).sort((a, b) => a - b);
+    const latestIteration = uniqueIterations[uniqueIterations.length - 1];
+    if (!selectedLogIteration) {
+      setSelectedLogIteration(String(latestIteration));
+      return;
+    }
+
+    const requestedIteration = Number(selectedLogIteration);
+    if (!uniqueIterations.includes(requestedIteration)) {
+      setSelectedLogIteration(String(latestIteration));
+    }
+  }, [selectedLogIteration, selectedLogNode, liveLogEntries]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -2292,16 +2512,22 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       }
       return nodes;
     }
+    if (isPostRunNeutralGraph) {
+      return nodes;
+    }
     const maxIdx = Math.min(currentStep, startedSequence.length - 1);
     for (let i = 0; i <= maxIdx; i += 1) {
       const node = startedSequence[i]?.node;
       if (node) nodes.add(node);
     }
     return nodes;
-  }, [result, currentStep, isRunning, startedSequence]);
+  }, [result, currentStep, isRunning, isPostRunNeutralGraph, startedSequence]);
 
   const traversedEdges = React.useMemo(() => {
     const edges = new Set<string>();
+    if (!isRunning && isPostRunNeutralGraph) {
+      return edges;
+    }
     const maxIdx = isRunning
       ? startedSequence.length - 1
       : Math.min(currentStep, startedSequence.length - 1);
@@ -2311,7 +2537,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       if (prev && cur) edges.add(`${prev}->${cur}`);
     }
     return edges;
-  }, [startedSequence, currentStep, isRunning]);
+  }, [startedSequence, currentStep, isRunning, isPostRunNeutralGraph]);
 
   function smoothScrollToElement(
     targetRef: React.RefObject<HTMLDivElement | null>,
@@ -2337,27 +2563,32 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     window.requestAnimationFrame(tick);
   }
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function startRun() {
+    if (isRunning) return;
     const nextSearchKey = normalizeSearchContextKey(role, location, recencyPreference);
-    const hasStickyFeed = stickyFeedLeads.length > 0;
+    const normalizedSticky = dedupeFinalLeadCardsByRedundancy(stickyFeedLeads);
+    const stickyLeadsForRun = normalizedSticky.deduped;
+    const hasStickyFeed = stickyLeadsForRun.length > 0;
     const isSameContextRerun = hasStickyFeed && activeSearchKey === nextSearchKey;
-    const shownIdentityKeys = isSameContextRerun ? extractShownIdentityKeys(stickyFeedLeads) : [];
+    const shownIdentityKeys = isSameContextRerun ? extractShownIdentityKeys(stickyLeadsForRun) : [];
 
     runSearchKeyRef.current = nextSearchKey;
-    runBaseStickyCountRef.current = isSameContextRerun ? stickyFeedLeads.length : 0;
+    runBaseStickyCountRef.current = isSameContextRerun ? stickyLeadsForRun.length : 0;
     runStartedWithExistingFeedRef.current = isSameContextRerun;
     runAccumulatedAddedCountRef.current = 0;
     setRunStartedWithExistingFeed(isSameContextRerun);
     setLastRunNewLeadCount(null);
     setActiveSearchKey(nextSearchKey);
+    if (normalizedSticky.droppedCount > 0) {
+      setStickyFeedLeads(stickyLeadsForRun);
+    }
     if (!isSameContextRerun) {
       setStickyFeedLeads([]);
     }
 
     setIsRunning(true);
     setResult(null);
-    setError(null);
+    setRunErrorSummary(null);
     setNodewiseExplanation(null);
     setLiveLogEntries([]);
     setLiveExtractionRows([]);
@@ -2373,8 +2604,11 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     setMessageErrorByRow({});
     setInterimFinalResponse(null);
     setActiveStage(null);
-    setSelectedGraphNode(null);
+    setIsGraphPlaybackEngaged(false);
     setCurrentStep(0);
+    setPlaybackIndex(0);
+    setSelectedLogIteration("");
+    setSelectedLogNode("");
     if (mode === "post-feed") {
       smoothScrollToElement(postFeedSectionRef, 800, 12);
     } else {
@@ -2398,9 +2632,12 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       if (!res.ok || !res.body) {
         const body = (await res.json().catch(() => null)) as {
           ok: false;
-          error: { message: string };
+          error?: { message?: string; code?: string };
         } | null;
-        throw new Error(readApiErrorMessage(body, "Debug run failed"));
+        throw {
+          message: readApiErrorMessage(body, "Debug run failed"),
+          code: body?.error?.code ?? null,
+        };
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -2440,7 +2677,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                 payload: InterimFinalResponse;
               }
             | { type: "final"; payload: DebugRunOutput }
-            | { type: "error"; message: string };
+            | { type: "error"; message: string; code?: string };
           if (evt.type === "started") {
             setActiveStage(evt.node);
             setCurrentStep(Math.max(0, evt.step - 1));
@@ -2555,21 +2792,36 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
             setActiveStage(null);
             setInterimFinalResponse(null);
             setResult(evt.payload);
-            setSelectedLogIteration("0");
-            setSelectedLogNode("planning_phase");
+            setIsGraphPlaybackEngaged(false);
+            setPlaybackIndex(0);
+            setCurrentStep(0);
+            setSelectedLogIteration("");
+            setSelectedLogNode("");
             if (runStartedWithExistingFeedRef.current) {
               setLastRunNewLeadCount(runAccumulatedAddedCountRef.current);
             }
           } else if (evt.type === "error") {
-            throw new Error(evt.message);
+            throw { message: evt.message, code: evt.code ?? null };
           }
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Agent run failed");
+      const normalized = normalizeStreamError(err);
+      setRunErrorSummary(
+        summarizeUiError({
+          source: "run",
+          rawMessage: normalized.message,
+          code: normalized.code,
+        }),
+      );
     } finally {
       setIsRunning(false);
     }
+  }
+
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    void startRun();
   }
 
   return (
@@ -2669,7 +2921,22 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               </select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="resumeUpload">Resume (optional)</Label>
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="resumeUpload">Resume (optional)</Label>
+                <span className="group/help relative inline-flex items-center">
+                  <button
+                    type="button"
+                    aria-label="Resume personalization help"
+                    className="text-xs text-muted-foreground transition-colors duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm px-0.5"
+                  >
+                    why?
+                  </button>
+                  <span className="pointer-events-none absolute left-1/2 top-full z-30 mt-1 hidden w-[280px] max-w-[320px] -translate-x-1/2 rounded-md border border-[var(--intent-muted-border)] bg-background px-2 py-1 text-[11px] leading-snug text-foreground shadow-md group-hover/help:block group-focus-within/help:block dark:bg-popover dark:text-popover-foreground">
+                    Uploading your resume helps personalize generated outreach messages to your
+                    background. Used only for this browser session.
+                  </span>
+                </span>
+              </div>
               <input
                 ref={resumeInputRef}
                 id="resumeUpload"
@@ -2705,9 +2972,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                 ) : null}
               </div>
               <p
-                className={`text-xs ${
+                className={`truncate text-xs ${
                   resumeParseStatus === "error" ? "text-destructive" : "text-muted-foreground"
                 }`}
+                title={
+                  resumeParseStatus === "error"
+                    ? (resumeParseError ?? "Couldn't parse this resume. Upload a PDF or DOCX up to 5 MB.")
+                    : undefined
+                }
               >
                 {resumeParseStatus === "parsing"
                   ? "Parsing..."
@@ -2730,9 +3002,29 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
             </div>
           </div>
         </form>
-        {error ? (
-          <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
+        {runErrorSummary ? (
+          <div className="mt-4 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
+            <p className="min-w-0 truncate text-sm text-destructive">{runErrorSummary}</p>
+            <div className="flex items-center gap-1.5">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => void startRun()}
+                disabled={isRunning}
+              >
+                Retry
+              </Button>
+              <button
+                type="button"
+                aria-label="Dismiss run error"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-destructive/80 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => setRunErrorSummary(null)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         ) : null}
       </Card>
@@ -2741,7 +3033,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         <>
           <div
             ref={postFeedSectionRef}
-            className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)] lg:items-start"
+            className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)] lg:items-start"
           >
             <Card className="h-fit border-[var(--intent-muted-border)] bg-[var(--section-workspace-bg)] p-4 lg:sticky lg:top-4">
               <div className="flex items-center justify-between gap-2">
@@ -3161,16 +3453,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       : "No new posts found"}
                   </div>
                 ) : null}
-                {error && postFeedRows.length > 0 ? (
-                  <div className="mb-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-                    {error}
-                  </div>
-                ) : null}
-                {error && postFeedRows.length === 0 ? (
-                  <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
-                    {error}
-                  </div>
-                ) : isNoRetrievedWhileRunning ? (
+                {isNoRetrievedWhileRunning ? (
                   <div className="space-y-3">
                     <div className="relative mb-3 overflow-hidden rounded-md border border-[var(--intent-muted-border)] bg-[var(--brand-soft)] px-3 py-1.5 text-xs text-foreground">
                       <div className="absolute inset-0 -z-10 bg-gradient-to-r from-transparent via-background/30 to-transparent opacity-40 motion-safe:animate-pulse motion-reduce:animate-none" />
@@ -3247,10 +3530,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     {visiblePostFeedRows.map((row) => (
                       <PostCard
                         key={row.key}
-                        title={row.lead.jobTitle ?? row.lead.title ?? "Untitled role"}
+                        title={row.displayRoleTitle}
                         company={row.companyDisplayText}
                         locationDisplay={row.locationDisplay}
-                        postAuthor={row.lead.postAuthor ?? null}
+                        postAuthor={row.displayPostAuthor ?? null}
                         authorHeadline={row.authorProfile?.headline ?? null}
                         authorTypeLabel={row.authorTypeLabel}
                         postedAt={row.lead.postedAt ?? null}
@@ -3272,6 +3555,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         isMessageGenerating={Boolean(messageGeneratingByRow[row.key])}
                         messageDraft={generatedMessagesByRow[row.key] ?? null}
                         messageError={messageErrorByRow[row.key] ?? null}
+                        onDismissMessageError={() =>
+                          setMessageErrorByRow((prev) => ({ ...prev, [row.key]: null }))
+                        }
                         onCopyMessage={() => void onCopyMessageForRow(row)}
                         isMessageCopied={messageCopiedRowKey === row.key}
                         onOpenMessageDrawer={() => setMessageDrawerRowKey(row.key)}
@@ -3322,9 +3608,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <h3 className="line-clamp-2 text-sm font-semibold">
-                        {selectedDrawerRow.lead.jobTitle ??
-                          selectedDrawerRow.lead.title ??
-                          "Untitled role"}
+                        {selectedDrawerRow.displayRoleTitle}
                       </h3>
                     </div>
                     <button
@@ -3353,7 +3637,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                   {!messageGeneratingByRow[selectedDrawerRow.key] &&
                   messageErrorByRow[selectedDrawerRow.key] ? (
                     <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-2.5">
-                      <p className="text-xs text-destructive">
+                      <p
+                        className="truncate text-xs text-destructive"
+                        title={messageErrorByRow[selectedDrawerRow.key] ?? undefined}
+                      >
                         {messageErrorByRow[selectedDrawerRow.key]}
                       </p>
                       <div className="space-y-1.5">
@@ -3372,20 +3659,36 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                           placeholder="e.g. make it more direct"
                         />
                       </div>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        type="button"
-                        className="h-7 px-2 text-xs"
-                        onClick={() =>
-                          void onGenerateMessageForRow(selectedDrawerRow, {
-                            force: true,
-                            userInstruction: selectedDrawerInstruction,
-                          })
-                        }
-                      >
-                        Retry
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          type="button"
+                          className="h-7 px-2 text-xs"
+                          onClick={() =>
+                            void onGenerateMessageForRow(selectedDrawerRow, {
+                              force: true,
+                              userInstruction: selectedDrawerInstruction,
+                            })
+                          }
+                        >
+                          Retry
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          type="button"
+                          className="h-7 px-2 text-xs"
+                          onClick={() =>
+                            setMessageErrorByRow((prev) => ({
+                              ...prev,
+                              [selectedDrawerRow.key]: null,
+                            }))
+                          }
+                        >
+                          Dismiss
+                        </Button>
+                      </div>
                     </div>
                   ) : null}
 
@@ -3490,163 +3793,17 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       ) : (
         <>
           <div ref={graphSectionRef} className="flex w-full flex-col">
-            <div className="order-2 mt-4 grid w-full gap-4 lg:grid-cols-2">
-              <Card className="p-4">
-                <h2 className="text-sm font-semibold">Planner Decision</h2>
-                <div className="mt-3 overflow-auto rounded-md border border-border/60">
-                  <table className="min-w-full text-left text-xs">
-                    <tbody>
-                      {[
-                        [
-                          "iteration",
-                          plannerDecisionSnapshot.iteration == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.iteration),
-                        ],
-                        [
-                          "highQualityLeadsCount",
-                          plannerDecisionSnapshot.highQualityLeadsCount == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.highQualityLeadsCount),
-                        ],
-                        [
-                          "targetHighQualityLeads",
-                          plannerDecisionSnapshot.targetHighQualityLeads == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.targetHighQualityLeads),
-                        ],
-                        ["plannerMode", String(plannerDecisionSnapshot.plannerMode)],
-                        [
-                          "enableRetrieval",
-                          plannerDecisionSnapshot.enableRetrieval == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.enableRetrieval),
-                        ],
-                        [
-                          "enableNewLeadGeneration",
-                          plannerDecisionSnapshot.enableNewLeadGeneration == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.enableNewLeadGeneration),
-                        ],
-                        [
-                          "numExploreQueries",
-                          plannerDecisionSnapshot.numExploreQueries == null
-                            ? "n/a"
-                            : String(plannerDecisionSnapshot.numExploreQueries),
-                        ],
-                      ].map(([k, v]) => (
-                        <tr key={`planner-decision-${k}`} className="border-t border-border/50">
-                          <td
-                            className="w-[1%] whitespace-nowrap px-3 py-2 font-medium"
-                            suppressHydrationWarning
-                          >
-                            {k}
-                          </td>
-                          <td className="px-3 py-2" suppressHydrationWarning>
-                            {v}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="mt-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    rationale
-                  </p>
-                  {plannerDecisionSnapshot.rationale.length === 0 ? (
-                    <p className="mt-1 text-xs text-muted-foreground">No rationale yet.</p>
-                  ) : (
-                    <ol className="mt-1 list-decimal space-y-1 pl-4 text-xs">
-                      {plannerDecisionSnapshot.rationale.map((item, idx) => (
-                        <li key={`planner-rationale-${idx}`}>{item}</li>
-                      ))}
-                    </ol>
-                  )}
-                </div>
-              </Card>
-
-              <Card className="p-4">
-                <h2 className="text-sm font-semibold">Data Source Breakdown</h2>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Computed from combined provenance and scored top leads.
-                </p>
-                <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
-                  <p>totalRetrievedLeads: {retrievalVsFreshSnapshot.totalRetrievedLeads}</p>
-                  <p>totalFreshLeads: {retrievalVsFreshSnapshot.totalFreshLeads}</p>
-                  <p>totalBothLeads: {retrievalVsFreshSnapshot.totalBothLeads}</p>
-                  <p>selectedRetrievedLeads: {retrievalVsFreshSnapshot.selectedRetrievedLeads}</p>
-                  <p>selectedFreshLeads: {retrievalVsFreshSnapshot.selectedFreshLeads}</p>
-                  <p>selectedTopLeads: {retrievalVsFreshSnapshot.selectedTotal}</p>
-                </div>
-                <div className="mt-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    selected top leads composition
-                  </p>
-                  {retrievalVsFreshSnapshot.selectedTotal === 0 ? (
-                    <p className="mt-1 text-xs text-muted-foreground">No selected leads yet.</p>
-                  ) : (
-                    <>
-                      <div className="mt-2 flex h-3 w-full overflow-hidden rounded bg-muted">
-                        <div
-                          className="h-full bg-sky-500"
-                          style={{
-                            width: `${
-                              (retrievalVsFreshSnapshot.selectedRetrievedOnlyLeads /
-                                retrievalVsFreshSnapshot.selectedTotal) *
-                              100
-                            }%`,
-                          }}
-                        />
-                        <div
-                          className="h-full bg-emerald-500"
-                          style={{
-                            width: `${
-                              (retrievalVsFreshSnapshot.selectedFreshOnlyLeads /
-                                retrievalVsFreshSnapshot.selectedTotal) *
-                              100
-                            }%`,
-                          }}
-                        />
-                        <div
-                          className="h-full bg-amber-500"
-                          style={{
-                            width: `${
-                              (retrievalVsFreshSnapshot.selectedBothLeads /
-                                retrievalVsFreshSnapshot.selectedTotal) *
-                              100
-                            }%`,
-                          }}
-                        />
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                        <Badge variant="secondary">
-                          retrieved: {retrievalVsFreshSnapshot.selectedRetrievedOnlyLeads}
-                        </Badge>
-                        <Badge variant="secondary">
-                          fresh: {retrievalVsFreshSnapshot.selectedFreshOnlyLeads}
-                        </Badge>
-                        <Badge variant="secondary">
-                          both: {retrievalVsFreshSnapshot.selectedBothLeads}
-                        </Badge>
-                        <Badge variant="secondary">
-                          unknown: {retrievalVsFreshSnapshot.selectedUnknownLeads}
-                        </Badge>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </Card>
-            </div>
-
-            <Card className="order-1 p-4">
+            <Card className="p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold">Graph</h2>
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Graph</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Generated from the precise flow implemented.
+                  </p>
+                </div>
                 <div className="ml-auto flex items-center gap-2.5">
                   <p className="text-xs text-muted-foreground">
-                    Step{" "}
-                    {startedSequence.length ? Math.min(currentStep + 1, startedSequence.length) : 0}{" "}
-                    of {startedSequence.length}
+                    Step {displayedGraphStep} of {startedSequence.length}
                   </p>
                   <Button
                     type="button"
@@ -3655,9 +3812,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     disabled={!hasRunData}
                     onClick={() => {
                       setIsPlaybackPlaying(false);
+                      setIsGraphPlaybackEngaged(false);
                       setPlaybackIndex(0);
                       setCurrentStep(0);
-                      setSelectedGraphNode(null);
                     }}
                     className="h-9 px-3 shadow-none transition-all duration-150 ease-out hover:bg-muted/40 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-300/50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:active:scale-100"
                   >
@@ -3668,7 +3825,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     variant="outline"
                     size="sm"
                     disabled={isRunning || !hasRunData}
-                    onClick={() => setIsPlaybackPlaying((v) => !v)}
+                    onClick={() => {
+                      setIsGraphPlaybackEngaged(true);
+                      setIsPlaybackPlaying((v) => !v);
+                    }}
                     title={isPlaybackPlaying ? "Pause" : "Autoplay"}
                     aria-label={isPlaybackPlaying ? "Pause" : "Autoplay"}
                     className="h-9 gap-2 px-3 shadow-none transition-all duration-150 ease-out hover:bg-muted/40 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-300/50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:active:scale-100"
@@ -3687,6 +3847,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     disabled={isRunning || currentStep === 0}
                     onClick={() =>
                       setPlaybackIndex((prev) => {
+                        setIsGraphPlaybackEngaged(true);
                         const next = Math.max(0, Math.min(playbackNodes.length - 1, prev - 1));
                         setCurrentStep(next);
                         return next;
@@ -3706,6 +3867,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     disabled={isRunning || currentStep === Math.max(playbackNodes.length - 1, 0)}
                     onClick={() =>
                       setPlaybackIndex((prev) => {
+                        setIsGraphPlaybackEngaged(true);
                         const next = Math.min(playbackNodes.length - 1, prev + 1);
                         setCurrentStep(next);
                         return next;
@@ -3728,14 +3890,24 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                   nodeDetails={nodeDetails}
                   traversedEdges={traversedEdges}
                   variant="data-flow"
+                  highlightDataFlow={!isPostRunNeutralGraph}
                   onNodeClick={(nodeId) => {
                     setIsPlaybackPlaying(false);
-                    setSelectedGraphNode(nodeId);
+                    setIsGraphPlaybackEngaged(true);
                     setSelectedLogNode(nodeId);
                     const idx = startedSequence.findIndex((s) => s.node === nodeId);
                     if (idx >= 0) {
                       setPlaybackIndex(idx);
                       setCurrentStep(idx);
+                    }
+                    const iterationsForNode = liveLogEntries
+                      .filter((entry) => entry.node === nodeId)
+                      .map((entry) => entry.iteration);
+                    if (iterationsForNode.length > 0) {
+                      const latestIteration = Math.max(...iterationsForNode);
+                      setSelectedLogIteration(String(latestIteration));
+                    } else if (iterationsAvailable.length > 0) {
+                      setSelectedLogIteration(String(iterationsAvailable[iterationsAvailable.length - 1]));
                     }
                   }}
                 />
@@ -3745,8 +3917,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
           <div className="grid w-full gap-4 lg:grid-cols-[minmax(0,4fr)_minmax(0,3fr)_minmax(0,3fr)]">
             <Card className="flex h-[360px] flex-col p-4">
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold">Nodewise Summary</h2>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold">Nodewise Summary</h2>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Auto-generated from selected node + iteration.
+                </p>
+                <div className="flex items-center gap-2">
                 <select
                   value={selectedLogIteration}
                   onChange={(e) => setSelectedLogIteration(e.target.value)}
@@ -3771,23 +3949,24 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     </option>
                   ))}
                 </select>
+                </div>
               </div>
               <div className="mt-3 min-h-0 flex-1 overflow-auto rounded-md border border-border/60 bg-background p-3 text-sm">
                 {isGeneratingNodewiseExplanation ? (
-                  <p className="text-muted-foreground">Generating summary...</p>
+                  <p className="text-muted-foreground">Generating concise node summary...</p>
                 ) : nodewiseExplanation ? (
-                  <div className="space-y-3 text-foreground">
+                  <div className="space-y-4 text-foreground">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Summary
                       </p>
-                      <p className="mt-1">{nodewiseExplanation.summary}</p>
+                      <p className="mt-1 leading-relaxed">{nodewiseExplanation.summary}</p>
                     </div>
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Inputs
                       </p>
-                      <ul className="mt-1 list-disc space-y-1 pl-5">
+                      <ul className="mt-1.5 list-disc space-y-1.5 pl-5">
                         {nodewiseExplanation.inputs.map((item, i) => (
                           <li key={`explain-input-${i}`}>{item}</li>
                         ))}
@@ -3797,7 +3976,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Outputs
                       </p>
-                      <ul className="mt-1 list-disc space-y-1 pl-5">
+                      <ul className="mt-1.5 list-disc space-y-1.5 pl-5">
                         {nodewiseExplanation.outputs.map((item, i) => (
                           <li key={`explain-output-${i}`}>{item}</li>
                         ))}
@@ -3807,7 +3986,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         State
                       </p>
-                      <ul className="mt-1 list-disc space-y-1 pl-5">
+                      <ul className="mt-1.5 list-disc space-y-1.5 pl-5">
                         {nodewiseExplanation.state.map((item, i) => (
                           <li key={`explain-state-${i}`}>{item}</li>
                         ))}
@@ -3816,7 +3995,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                   </div>
                 ) : (
                   <p className="text-muted-foreground">
-                    Select both Iteration and Node to generate summary, inputs, outputs, and state.
+                    Select Iteration and Node to generate a concise node summary.
                   </p>
                 )}
               </div>
@@ -3914,11 +4093,12 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               <p className="mt-1 text-xs text-muted-foreground">
                 Agent-side safety limits and observed Apify call count for this run.
               </p>
-              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
                 <p>apifyCallsMade: {costGuardMetrics.apifyCallsMade}</p>
                 <p>queriesInRun: {costGuardMetrics.queryCount}</p>
                 <p>maxItemsPerCall: {costGuardMetrics.maxItemsPerCall}</p>
                 <p>payloadAttemptsPerQuery: {costGuardMetrics.payloadAttemptsPerQuery}</p>
+                <p>apiEventsCaptured: {liveApiCalls.length}</p>
               </div>
               {costGuardMetrics.apifyCallsMade === 0 ? (
                 <p className="mt-2 text-xs text-muted-foreground">
@@ -3928,74 +4108,154 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
             </Card>
           ) : null}
 
-          <Card className="p-4">
-            <h2 className="text-sm font-semibold">API calls (live)</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Each external request during the debug run (Apify, OpenAI, etc.), with redacted
-              secrets and truncated payloads.
-            </p>
-            <div
-              ref={apiCallsScrollRef}
-              className="mt-3 max-h-[420px] overflow-auto rounded-md border border-border/60"
-            >
-              <table className="min-w-full text-left text-xs">
-                <thead className="sticky top-0 z-10 bg-muted/95 text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/80">
-                  <tr>
-                    <th className="w-[1%] whitespace-nowrap px-3 py-2 font-medium">#</th>
-                    <th className="w-[1%] whitespace-nowrap px-3 py-2 font-medium">Time</th>
-                    <th className="w-[1%] whitespace-nowrap px-3 py-2 font-medium">Node</th>
-                    <th className="min-w-[140px] px-3 py-2 font-medium">API</th>
-                    <th className="w-[1%] whitespace-nowrap px-3 py-2 font-medium">Method</th>
-                    <th className="min-w-[140px] px-3 py-2 font-medium">Input</th>
-                    <th className="min-w-[140px] px-3 py-2 font-medium">Output</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {liveApiCalls.length === 0 ? (
-                    <tr className="border-t border-border/50">
-                      <td className="px-3 py-3 text-muted-foreground" colSpan={7}>
-                        {isRunning
-                          ? "Waiting for outbound API calls…"
-                          : "No API rows yet. Run the debug flow to stream calls here."}
-                      </td>
-                    </tr>
-                  ) : (
-                    liveApiCalls.map((row) => (
-                      <tr key={`api-${row.id}`} className="border-t border-border/50 align-top">
-                        <td className="whitespace-nowrap px-3 py-2 font-mono">{row.id}</td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px]">
-                          {new Date(row.at).toLocaleTimeString()}
+          <div className="grid w-full gap-4 lg:grid-cols-2">
+            <Card className="p-4">
+              <h2 className="text-sm font-semibold">Planner Decision</h2>
+              <div className="mt-3 overflow-auto rounded-md border border-border/60">
+                <table className="min-w-full text-left text-xs">
+                  <tbody>
+                    {[
+                      [
+                        "iteration",
+                        plannerDecisionSnapshot.iteration == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.iteration),
+                      ],
+                      [
+                        "highQualityLeadsCount",
+                        plannerDecisionSnapshot.highQualityLeadsCount == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.highQualityLeadsCount),
+                      ],
+                      [
+                        "targetHighQualityLeads",
+                        plannerDecisionSnapshot.targetHighQualityLeads == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.targetHighQualityLeads),
+                      ],
+                      ["plannerMode", String(plannerDecisionSnapshot.plannerMode)],
+                      [
+                        "enableRetrieval",
+                        plannerDecisionSnapshot.enableRetrieval == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.enableRetrieval),
+                      ],
+                      [
+                        "enableNewLeadGeneration",
+                        plannerDecisionSnapshot.enableNewLeadGeneration == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.enableNewLeadGeneration),
+                      ],
+                      [
+                        "numExploreQueries",
+                        plannerDecisionSnapshot.numExploreQueries == null
+                          ? "n/a"
+                          : String(plannerDecisionSnapshot.numExploreQueries),
+                      ],
+                    ].map(([k, v]) => (
+                      <tr key={`planner-decision-${k}`} className="border-t border-border/50">
+                        <td
+                          className="w-[1%] whitespace-nowrap px-3 py-2 font-medium"
+                          suppressHydrationWarning
+                        >
+                          {k}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono">{row.node}</td>
-                        <td className="px-3 py-2">
-                          <div className="font-medium">{row.api}</div>
-                          {row.url ? (
-                            <div
-                              className="mt-0.5 max-w-[280px] truncate font-mono text-[10px] text-muted-foreground"
-                              title={row.url}
-                            >
-                              {row.url}
-                            </div>
-                          ) : null}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono">{row.method}</td>
-                        <td className="px-3 py-2">
-                          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/40 p-2 font-mono text-[10px]">
-                            {formatJsonForDebug(row.input)}
-                          </pre>
-                        </td>
-                        <td className="px-3 py-2">
-                          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/40 p-2 font-mono text-[10px]">
-                            {formatJsonForDebug(row.output)}
-                          </pre>
+                        <td className="px-3 py-2" suppressHydrationWarning>
+                          {v}
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  rationale
+                </p>
+                {plannerDecisionSnapshot.rationale.length === 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">No rationale yet.</p>
+                ) : (
+                  <ol className="mt-1 list-decimal space-y-1 pl-4 text-xs">
+                    {plannerDecisionSnapshot.rationale.map((item, idx) => (
+                      <li key={`planner-rationale-${idx}`}>{item}</li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            </Card>
+
+            <Card className="p-4">
+              <h2 className="text-sm font-semibold">Data Source Breakdown</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Computed from combined provenance and scored top leads.
+              </p>
+              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                <p>totalRetrievedLeads: {retrievalVsFreshSnapshot.totalRetrievedLeads}</p>
+                <p>totalFreshLeads: {retrievalVsFreshSnapshot.totalFreshLeads}</p>
+                <p>totalBothLeads: {retrievalVsFreshSnapshot.totalBothLeads}</p>
+                <p>selectedRetrievedLeads: {retrievalVsFreshSnapshot.selectedRetrievedLeads}</p>
+                <p>selectedFreshLeads: {retrievalVsFreshSnapshot.selectedFreshLeads}</p>
+                <p>selectedTopLeads: {retrievalVsFreshSnapshot.selectedTotal}</p>
+              </div>
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  selected top leads composition
+                </p>
+                {retrievalVsFreshSnapshot.selectedTotal === 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">No selected leads yet.</p>
+                ) : (
+                  <>
+                    <div className="mt-2 flex h-3 w-full overflow-hidden rounded bg-muted">
+                      <div
+                        className="h-full bg-sky-500"
+                        style={{
+                          width: `${
+                            (retrievalVsFreshSnapshot.selectedRetrievedOnlyLeads /
+                              retrievalVsFreshSnapshot.selectedTotal) *
+                            100
+                          }%`,
+                        }}
+                      />
+                      <div
+                        className="h-full bg-emerald-500"
+                        style={{
+                          width: `${
+                            (retrievalVsFreshSnapshot.selectedFreshOnlyLeads /
+                              retrievalVsFreshSnapshot.selectedTotal) *
+                            100
+                          }%`,
+                        }}
+                      />
+                      <div
+                        className="h-full bg-amber-500"
+                        style={{
+                          width: `${
+                            (retrievalVsFreshSnapshot.selectedBothLeads /
+                              retrievalVsFreshSnapshot.selectedTotal) *
+                            100
+                          }%`,
+                        }}
+                      />
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                      <Badge variant="secondary">
+                        retrieved: {retrievalVsFreshSnapshot.selectedRetrievedOnlyLeads}
+                      </Badge>
+                      <Badge variant="secondary">
+                        fresh: {retrievalVsFreshSnapshot.selectedFreshOnlyLeads}
+                      </Badge>
+                      <Badge variant="secondary">
+                        both: {retrievalVsFreshSnapshot.selectedBothLeads}
+                      </Badge>
+                      <Badge variant="secondary">
+                        unknown: {retrievalVsFreshSnapshot.selectedUnknownLeads}
+                      </Badge>
+                    </div>
+                  </>
+                )}
+              </div>
+            </Card>
+          </div>
 
           <Card className="p-4">
             <h2 className="text-sm font-semibold">Scoring Breakdown</h2>
@@ -4173,6 +4433,16 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
                           ? lead.sourceMetadataJson
                           : null;
+                      const postContext = resolvePostContextFromSourceMetadata(sourceMetadata);
+                      const displayPostUrl =
+                        toHttpUrlOrNull(postContext?.primaryPostUrl) ??
+                        toHttpUrlOrNull(lead.postUrl) ??
+                        toHttpUrlOrNull(lead.canonicalUrl);
+                      const displayPostAuthor = postContext?.primaryAuthorName ?? lead.postAuthor;
+                      const displayPostAuthorUrl =
+                        toHttpUrlOrNull(postContext?.primaryAuthorProfileUrl) ??
+                        toHttpUrlOrNull(lead.postAuthorUrl);
+                      const displayRoleTitle = resolveDisplayRoleTitle({ lead });
                       const extraction =
                         sourceMetadata?.extraction && typeof sourceMetadata.extraction === "object"
                           ? (sourceMetadata.extraction as Record<string, unknown>)
@@ -4203,25 +4473,31 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                             <td className="whitespace-nowrap px-3 py-2 align-top">{idx + 1}</td>
                             <td className="px-3 py-2 align-top">{lead.generatedQuery ?? "n/a"}</td>
                             <td className="px-3 py-2 align-top">
-                              <a
-                                href={lead.postUrl ?? lead.canonicalUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-primary underline"
-                              >
-                                {lead.postUrl ?? lead.canonicalUrl}
-                              </a>
-                            </td>
-                            <td className="px-3 py-2 align-top">{lead.postAuthor ?? "Unknown"}</td>
-                            <td className="px-3 py-2 align-top">
-                              {lead.postAuthorUrl ? (
+                              {displayPostUrl ? (
                                 <a
-                                  href={lead.postAuthorUrl}
+                                  href={displayPostUrl}
                                   target="_blank"
                                   rel="noreferrer"
                                   className="text-primary underline"
                                 >
-                                  {lead.postAuthorUrl}
+                                  {displayPostUrl}
+                                </a>
+                              ) : (
+                                lead.canonicalUrl
+                              )}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              {displayPostAuthor ?? "Unknown"}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              {displayPostAuthorUrl ? (
+                                <a
+                                  href={displayPostAuthorUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-primary underline"
+                                >
+                                  {displayPostAuthorUrl}
                                 </a>
                               ) : (
                                 "N/A"
@@ -4282,7 +4558,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                               {authorProfile?.headline ?? "N/A"}
                             </td>
                             <td className="px-3 py-2 align-top">{authorProfile?.about ?? "N/A"}</td>
-                            <td className="px-3 py-2 align-top">{lead.jobTitle ?? lead.title}</td>
+                            <td className="px-3 py-2 align-top">{displayRoleTitle}</td>
                             <td className="px-3 py-2 align-top">
                               {scoredLead
                                 ? scoredLead.leadScore.toFixed(3)

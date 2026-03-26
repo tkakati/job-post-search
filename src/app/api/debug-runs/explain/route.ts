@@ -40,11 +40,14 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey });
     const model = process.env.OPENAI_CHAT_MODEL || "gpt-5.2";
     const prompt = [
-      "You are writing concise product UI explanations.",
+      "You write concise node explanations for a product debug UI.",
       "Given the selected node and iteration data, return plain English only.",
-      "No technical jargon, no markdown, no JSON comments.",
-      "summary must be exactly 20 words.",
-      "inputs/outputs/state should each be 2-4 short bullet texts.",
+      "No markdown, no jargon-heavy phrasing, no JSON comments.",
+      "Output must be strict JSON only.",
+      "Write a short summary sentence (around 12-22 words).",
+      "Each of inputs/outputs/state should contain 2-3 concise bullet-style strings.",
+      "Focus on what the node decided or did, what changed, and why it matters for flow.",
+      "Avoid filler and repetition.",
       "",
       `Selected node: ${parsed.data.node}`,
       `Iteration: ${parsed.data.iteration}`,
@@ -87,4 +90,3 @@ export async function POST(req: Request) {
     );
   }
 }
-

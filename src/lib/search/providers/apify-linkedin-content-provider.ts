@@ -1,5 +1,6 @@
 import { env } from "@/lib/env";
 import { emitDebugApiCall, redactApifyUrl } from "@/lib/debug/api-call-sink";
+import { resolveLinkedinPostContext } from "@/lib/linkedin/repost-context";
 import type {
   ProviderQueryInput,
   ProviderRawResult,
@@ -15,8 +16,12 @@ type ApifyDatasetItem = {
   description?: string;
   company?: string;
   author?: unknown;
+  authorName?: string;
+  authorProfileUrl?: string;
   location?: string;
   postedAt?: string;
+  isRepost?: boolean;
+  resharedPost?: Record<string, unknown>;
 };
 
 type ApifyRunData = {
@@ -57,22 +62,35 @@ function toAuthorString(value: unknown): string | null {
   return null;
 }
 
-function normalizeApifyItem(item: ApifyDatasetItem): ProviderRawResult | null {
-  const url = item.postUrl ?? item.url;
-  const titleOrRole = item.title ?? item.text?.slice(0, 80) ?? "";
+export function normalizeApifyItem(item: ApifyDatasetItem): ProviderRawResult | null {
+  const postContext = resolveLinkedinPostContext(item as Record<string, unknown>);
+  const url = postContext.primaryPostUrl ?? item.postUrl ?? item.url;
+  const primaryText = postContext.primaryText;
+  const titleOrRole = item.title ?? primaryText?.slice(0, 80) ?? item.text?.slice(0, 80) ?? "";
   if (!url || !titleOrRole) return null;
   return {
     url,
     titleOrRole,
     company: item.company ?? null,
     location: item.location ?? null,
-    author: toAuthorString(item.author),
-    snippet: item.description ?? item.text ?? null,
-    fullText: item.text ?? null,
+    author: postContext.primaryAuthorName ?? toAuthorString(item.author),
+    snippet: primaryText ?? item.description ?? item.text ?? null,
+    fullText: primaryText ?? item.text ?? item.description ?? null,
     postedAt: toIsoOrNull(item.postedAt),
     metadata: {
       provider: "apify-linkedin-content",
       inputUrl: item.inputUrl ?? null,
+      authorProfileUrl: postContext.primaryAuthorProfileUrl ?? null,
+      postContext: {
+        isRepost: postContext.isRepost,
+        primaryPostUrl: postContext.primaryPostUrl,
+        primaryAuthorName: postContext.primaryAuthorName,
+        primaryAuthorProfileUrl: postContext.primaryAuthorProfileUrl,
+        primaryText: postContext.primaryText,
+        reposterAuthorName: postContext.reposterAuthorName,
+        reposterAuthorProfileUrl: postContext.reposterAuthorProfileUrl,
+        reposterText: postContext.reposterText,
+      },
     },
   };
 }
@@ -544,4 +562,3 @@ export const apifyLinkedinContentProvider: SearchExecutionProvider = {
     return executeApifyLinkedinContentSearch(input);
   },
 };
-
