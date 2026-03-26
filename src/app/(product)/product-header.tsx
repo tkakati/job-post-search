@@ -3,8 +3,8 @@
 import * as React from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { usePathname, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useProductViewMode } from "@/app/(product)/view-mode-context";
 
 export function ProductHeader() {
   const lastYRef = React.useRef(0);
@@ -13,15 +13,7 @@ export function ProductHeader() {
   const headerOffsetRef = React.useRef(0);
   const headerRef = React.useRef<HTMLElement | null>(null);
   const [headerOffsetPx, setHeaderOffsetPx] = React.useState(0);
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-
-  const activeView: "post-feed" | "agent" = React.useMemo(() => {
-    const view = searchParams?.get("view");
-    if (pathname === "/posts-feed") return "post-feed";
-    if (pathname === "/home") return view === "agent" ? "agent" : "post-feed";
-    return view === "agent" ? "agent" : "post-feed";
-  }, [pathname, searchParams]);
+  const { mode: activeView, setMode } = useProductViewMode();
 
   React.useEffect(() => {
     const processScrollFrame = () => {
@@ -108,10 +100,11 @@ export function ProductHeader() {
                   : "translate-x-0",
               )}
             />
-            <Link
-              href="/home?view=post-feed"
+            <button
+              type="button"
               role="tab"
               aria-selected={activeView === "post-feed"}
+              onClick={() => setMode("post-feed")}
               className={cn(
                 "relative z-10 flex h-8 min-w-[112px] items-center justify-center rounded-full px-4 text-sm font-medium transition-colors duration-200",
                 activeView === "post-feed"
@@ -120,11 +113,12 @@ export function ProductHeader() {
               )}
             >
               Post Feed
-            </Link>
-            <Link
-              href="/home?view=agent"
+            </button>
+            <button
+              type="button"
               role="tab"
               aria-selected={activeView === "agent"}
+              onClick={() => setMode("agent")}
               className={cn(
                 "relative z-10 flex h-8 min-w-[112px] items-center justify-center rounded-full px-4 text-sm font-medium transition-colors duration-200",
                 activeView === "agent"
@@ -133,7 +127,7 @@ export function ProductHeader() {
               )}
             >
               Agent View
-            </Link>
+            </button>
           </div>
         </nav>
 

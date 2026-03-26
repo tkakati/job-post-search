@@ -3061,7 +3061,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                 <div className="space-y-3">
                   <div className="space-y-2">
                     <div className="flex items-center gap-2">
-                      <Label htmlFor="post-feed-role" className="inline-block w-[72px] shrink-0">
+                      <Label htmlFor="post-feed-role" className="inline-block w-[60px] shrink-0">
                         Role
                       </Label>
                       <Input
@@ -3085,7 +3085,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <Label htmlFor="post-feed-location" className="inline-block w-[72px] shrink-0">
+                      <Label htmlFor="post-feed-location" className="inline-block w-[60px] shrink-0">
                         Location
                       </Label>
                       <Input
@@ -3109,7 +3109,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <Label htmlFor="post-feed-recency" className="inline-block w-[72px] shrink-0">
+                      <Label htmlFor="post-feed-recency" className="inline-block w-[60px] shrink-0">
                         Recency
                       </Label>
                       <select
@@ -3140,7 +3140,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <Label htmlFor="post-feed-work-mode" className="inline-block w-[72px] shrink-0">
+                      <Label htmlFor="post-feed-work-mode" className="inline-block w-[60px] shrink-0">
                         Work mode
                       </Label>
                       <select
@@ -3200,7 +3200,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                   {isAdvancedFiltersOpen ? (
                     <div id="more-options-feed-filters" className="mt-3 space-y-2">
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-employment-type" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-employment-type" className="inline-block w-[72px] shrink-0">
                           Emp type
                         </Label>
                         <select
@@ -3233,7 +3233,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-poster-type" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-poster-type" className="inline-block w-[72px] shrink-0">
                           Poster type
                         </Label>
                         <select
@@ -3264,7 +3264,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-match-strength" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-match-strength" className="inline-block w-[72px] shrink-0">
                           Match
                         </Label>
                         <select
@@ -3296,7 +3296,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-source" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-source" className="inline-block w-[72px] shrink-0">
                           Source
                         </Label>
                         <select
@@ -3327,7 +3327,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-status" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-status" className="inline-block w-[72px] shrink-0">
                           Status
                         </Label>
                         <select
@@ -3360,7 +3360,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <Label htmlFor="post-feed-new-only" className="inline-block w-[84px] shrink-0">
+                        <Label htmlFor="post-feed-new-only" className="inline-block w-[72px] shrink-0">
                           New only
                         </Label>
                         <select
