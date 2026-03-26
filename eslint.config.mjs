@@ -13,6 +13,8 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  // Prettier integration is handled via `npm run format` to avoid making lint
+  // fail on formatting drift during early scaffolding.
 ]);
 
 export default eslintConfig;

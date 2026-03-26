@@ -3,24 +3,140 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  --card: #ffffff;
+  --card-foreground: #171717;
+
+  --popover: #ffffff;
+  --popover-foreground: #171717;
+
+  --primary: #171717;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f3f4f6;
+  --secondary-foreground: #171717;
+
+  --muted: #f3f4f6;
+  --muted-foreground: #525252;
+
+  --accent: #f3f4f6;
+  --accent-foreground: #171717;
+
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+
+  --border: #e5e7eb;
+  --input: #e5e7eb;
+  --ring: #111827;
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #f1f5f9;
+  --brand: #2f7a4b;
+  --brand-soft: #e8f4ed;
+  --elevated-border: #d8dee6;
+  --section-nav-bg: #ffffff;
+  --section-controls-bg: #f8fafc;
+  --section-workspace-bg: #f8fafc;
+  --intent-primary: #2f7a4b;
+  --intent-primary-hover: #27643e;
+  --intent-muted-border: #d8dee6;
+
+  --radius: 0.5rem;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-elevated-border: var(--elevated-border);
+  --color-section-nav-bg: var(--section-nav-bg);
+  --color-section-controls-bg: var(--section-controls-bg);
+  --color-section-workspace-bg: var(--section-workspace-bg);
+  --color-intent-primary: var(--intent-primary);
+  --color-intent-primary-hover: var(--intent-primary-hover);
+  --color-intent-muted-border: var(--intent-muted-border);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --radius: var(--radius);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+
+    --card: #0a0a0a;
+    --card-foreground: #ededed;
+
+    --popover: #0a0a0a;
+    --popover-foreground: #ededed;
+
+    --primary: #ededed;
+    --primary-foreground: #0a0a0a;
+
+    --secondary: #1a1a1a;
+    --secondary-foreground: #ededed;
+
+    --muted: #1a1a1a;
+    --muted-foreground: #b8b8b8;
+
+    --accent: #1a1a1a;
+    --accent-foreground: #ededed;
+
+    --destructive: #ef4444;
+    --destructive-foreground: #0a0a0a;
+
+    --border: #2a2a2a;
+    --input: #2a2a2a;
+    --ring: #ffffff;
+    --surface-1: #0f141b;
+    --surface-2: #151c24;
+    --surface-3: #1d2530;
+    --brand: #5fae7b;
+    --brand-soft: #183224;
+    --elevated-border: #2f3a47;
+    --section-nav-bg: #0f141b;
+    --section-controls-bg: #151c24;
+    --section-workspace-bg: #151c24;
+    --intent-primary: #5fae7b;
+    --intent-primary-hover: #4e9669;
+    --intent-muted-border: #2f3a47;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
