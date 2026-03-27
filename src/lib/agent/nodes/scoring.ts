@@ -4,7 +4,12 @@ import type { LeadRecord } from "@/lib/types/contracts";
 import { appendDebug } from "@/lib/agent/nodes/helpers";
 import { cosineSimilarity, getEmbedding } from "@/lib/ai/embeddings";
 import { authorStrengthScoreFromType, resolveAuthorType } from "@/lib/author/classification";
-import { coerceLeadLocations, haversineDistance, resolveLocation } from "@/lib/location/geo";
+import {
+  coerceLeadLocations,
+  hasLocationAlias,
+  haversineDistance,
+  resolveLocation,
+} from "@/lib/location/geo";
 import { resolveExtractedCompany } from "@/lib/post-feed/company-resolution";
 import { dbClient } from "@/lib/db";
 import { leads } from "@/lib/db/schema";
@@ -16,6 +21,14 @@ type ScoreBreakdown = {
   authorStrengthScore: number;
   engagementScore: number;
   employmentTypeScore: number;
+};
+
+type LocationScoreDebug = {
+  score: number;
+  userResolved: boolean;
+  resolvedLeadCount: number;
+  usedUnknownFallback: boolean;
+  explicitResolvableMismatch: boolean;
 };
 
 const HIGH_QUALITY_THRESHOLD = 0.7;
@@ -115,7 +128,7 @@ function queueRoleEmbeddingBackfill(leadsIn: LeadRecord[]) {
   }
 }
 
-function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState) {
+function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState): LocationScoreDebug {
   const userResolved = resolveLocation(state.location);
   const leadLocations = coerceLeadLocations({
     locations: lead.locations,
@@ -124,15 +137,20 @@ function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState) {
   });
 
   let bestScore = 0;
+  let resolvedLeadCount = 0;
+  const userHasCoordinates = userResolved?.lat != null && userResolved.lon != null;
+  const userLat = userHasCoordinates ? userResolved.lat : null;
+  const userLon = userHasCoordinates ? userResolved.lon : null;
 
-  if (userResolved?.lat != null && userResolved.lon != null) {
+  if (userLat != null && userLon != null) {
     for (const loc of leadLocations) {
       const resolved = resolveLocation(loc.raw);
       const lat = resolved?.lat;
       const lon = resolved?.lon;
       if (lat == null || lon == null) continue;
+      resolvedLeadCount += 1;
 
-      const distance = haversineDistance(userResolved.lat, userResolved.lon, lat, lon);
+      const distance = haversineDistance(userLat, userLon, lat, lon);
       let score = 0;
       if (distance < 10) score = 1.0;
       else if (distance < 30) score = 0.9;
@@ -145,19 +163,32 @@ function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState) {
     }
   }
 
-  if (bestScore === 0) {
-    bestScore = 0.3;
-  }
+  const usedUnknownFallback = bestScore === 0;
+  if (usedUnknownFallback) bestScore = 0.5;
 
   if (lead.workMode === "remote") {
     bestScore = Math.max(bestScore, 0.7);
   }
 
-  if (state.locationIsHardFilter && bestScore < 0.6) {
-    return 0.2;
+  const explicitResolvableMismatch =
+    userHasCoordinates && resolvedLeadCount > 0 && bestScore < 0.6;
+  if (state.locationIsHardFilter && explicitResolvableMismatch) {
+    return {
+      score: 0.2,
+      userResolved: userHasCoordinates,
+      resolvedLeadCount,
+      usedUnknownFallback,
+      explicitResolvableMismatch,
+    };
   }
 
-  return bestScore;
+  return {
+    score: bestScore,
+    userResolved: userHasCoordinates,
+    resolvedLeadCount,
+    usedUnknownFallback,
+    explicitResolvableMismatch,
+  };
 }
 
 function authorStrengthScoreForLead(lead: LeadRecord) {
@@ -257,10 +288,11 @@ function employmentTypeScoreForLead(lead: LeadRecord, state: AgentGraphState) {
 
 function scoreLead(lead: LeadRecord, state: AgentGraphState) {
   const roleScore = roleMatchScoreForLead(lead, state);
+  const locationScore = locationMatchScoreForLead(lead, state);
   const authorScore = authorStrengthScoreForLead(lead);
   const breakdown: ScoreBreakdown = {
     roleMatchScore: roleScore.finalRoleScore,
-    locationMatchScore: locationMatchScoreForLead(lead, state),
+    locationMatchScore: locationScore.score,
     authorStrengthScore: authorScore.authorStrengthScore,
     engagementScore: engagementScoreForLead(lead),
     employmentTypeScore: employmentTypeScoreForLead(lead, state),
@@ -276,6 +308,7 @@ function scoreLead(lead: LeadRecord, state: AgentGraphState) {
     leadScore,
     scoreBreakdown: breakdown,
     roleScoreDebug: roleScore,
+    locationScoreDebug: locationScore,
     authorScoreDebug: authorScore,
   };
 }
@@ -386,6 +419,21 @@ export async function scoringNode(state: AgentGraphState) {
         `${lead.identityKey}: author_type=${lead.authorScoreDebug.authorType}, author_strength=${lead.authorScoreDebug.authorStrengthScore.toFixed(2)}, source=${lead.authorScoreDebug.resolutionSource}, phrase_hit=${lead.authorScoreDebug.hasHiringPhrase}`,
     )
     .join(" | ");
+  const locationResolvedUserCount = rankedLeads.filter(
+    (lead) => lead.locationScoreDebug.userResolved,
+  ).length;
+  const locationResolvedLeadCount = rankedLeads.filter(
+    (lead) => lead.locationScoreDebug.resolvedLeadCount > 0,
+  ).length;
+  const locationUnknownFallbackCount = rankedLeads.filter(
+    (lead) => lead.locationScoreDebug.usedUnknownFallback,
+  ).length;
+  const locationDistanceScoredCount = rankedLeads.filter(
+    (lead) => lead.locationScoreDebug.resolvedLeadCount > 0,
+  ).length;
+  const locationAliasHitCount =
+    rankedLeads.filter((lead) => hasLocationAlias(lead.rawLocationText ?? null)).length +
+    (hasLocationAlias(state.location) ? 1 : 0);
 
   return {
     scoringResults,
@@ -394,7 +442,7 @@ export async function scoringNode(state: AgentGraphState) {
     iteration: nextIteration,
     debugLog: appendDebug(
       state,
-      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
+      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, location_stats={locationResolvedUser:${locationResolvedUserCount}, locationResolvedLead:${locationResolvedLeadCount}, locationUnknownFallbackCount:${locationUnknownFallbackCount}, locationDistanceScoredCount:${locationDistanceScoredCount}, locationAliasHitCount:${locationAliasHitCount}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
     ),
   };
 }

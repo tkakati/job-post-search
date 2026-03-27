@@ -15,7 +15,8 @@
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:seed": "tsx drizzle/seed.ts"
+    "db:seed": "tsx drizzle/seed.ts",
+    "location:build-index": "tsx scripts/location/build-geonames-index.ts"
   },
   "dependencies": {
     "@langchain/core": "^1.1.35",

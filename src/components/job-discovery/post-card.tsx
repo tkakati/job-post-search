@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Copy, ExternalLink } from "lucide-react";
+import { Copy, ExternalLink, Eye } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -361,13 +361,14 @@ export function PostCard({
                   <span>{matchTag.label} • {toPercentLabel(leadScore)}</span>
                   {hasScoreBreakdownTooltip ? (
                     <span className="group relative inline-flex items-center">
-                      <span
-                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-current/60 text-[9px] leading-none"
+                      <button
+                        type="button"
+                        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-current/60 bg-background/90 text-current transition-colors hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current/35"
                         aria-label="Show match score details"
                       >
-                        i
-                      </span>
-                      <div className="pointer-events-none absolute left-0 top-5 z-20 hidden w-72 rounded-md border border-border/70 bg-white p-2 text-left text-[11px] text-foreground shadow-md group-hover:block dark:bg-popover dark:text-popover-foreground">
+                        <Eye className="h-2.5 w-2.5" />
+                      </button>
+                      <div className="pointer-events-none absolute left-0 top-5 z-20 hidden w-72 rounded-md border border-border/70 bg-white p-2 text-left text-[11px] text-foreground shadow-md group-hover:block group-focus-within:block dark:bg-popover dark:text-popover-foreground">
                         <p>
                           <span className="font-semibold">A Role Match:</span>{" "}
                           {toPercentLabel(roleMatchScore)}
