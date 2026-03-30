@@ -32,6 +32,11 @@ export const PlannerOutputSchema = z.object({
     totalRetrievedCandidates: z.number().int().nonnegative(),
     signalSource: z.string().min(1),
   }),
+  planningDiagnostics: z
+    .object({
+      elapsedMs: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export const RetrievalOutputSchema = z.object({
@@ -131,6 +136,9 @@ export const SearchOutputSchema = z.object({
     resultsFetched: z.number().int().nonnegative(),
     resultsKept: z.number().int().nonnegative(),
     dedupedCount: z.number().int().nonnegative(),
+    queryFanoutMs: z.number().int().nonnegative().optional(),
+    profileEnrichmentMs: z.number().int().nonnegative().optional(),
+    persistenceUpdateMs: z.number().int().nonnegative().optional(),
   }),
   leads: z.array(LeadRecordSchema),
   providerMetadataJson: JsonRecordSchema,
@@ -164,6 +172,11 @@ export const ExtractionOutputSchema = z.object({
     skipped: z.number().int().nonnegative(),
     averageConfidence: z.number().min(0).max(1),
     elapsedMs: z.number().int().nonnegative(),
+    batchCount: z.number().int().nonnegative().optional(),
+    extractionLatencyP50Ms: z.number().int().nonnegative().optional(),
+    extractionLatencyP90Ms: z.number().int().nonnegative().optional(),
+    llmBatchCount: z.number().int().nonnegative().optional(),
+    fallbackBatchCount: z.number().int().nonnegative().optional(),
     batches: z.array(
       z.object({
         batchIndex: z.number().int().nonnegative(),
@@ -221,6 +234,12 @@ export const CombinedResultOutputSchema = z.object({
     maxIterations: z.number().int().positive(),
     shownHistoryCount: z.number().int().nonnegative(),
     dedupedFromMergedCount: z.number().int().nonnegative(),
+    retrievalLatencyMs: z.number().int().nonnegative().optional(),
+    searchLatencyMs: z.number().int().nonnegative().optional(),
+    combineTimeMs: z.number().int().nonnegative().optional(),
+    totalIterationTimeMs: z.number().int().nonnegative().optional(),
+    crossSourceRedundancyDroppedCount: z.number().int().nonnegative().optional(),
+    countryMismatchDroppedCount: z.number().int().nonnegative().optional(),
   }),
 });
 
@@ -230,8 +249,17 @@ export const ScoredLeadSchema = LeadRecordSchema.extend({
     roleMatchScore: z.number().min(0).max(1),
     locationMatchScore: z.number().min(0).max(1),
     authorStrengthScore: z.number().min(0).max(1),
-    engagementScore: z.number().min(0).max(1),
+    hiringIntentScore: z.number().min(0).max(1).optional(),
+    engagementScore: z.number().min(0).max(1).optional(),
     employmentTypeScore: z.number().min(0).max(1),
+    baseScore: z.number().min(0).max(1).optional(),
+    intentBoost: z.number().min(0).max(15).optional(),
+    finalScore100: z.number().min(0).max(100).optional(),
+    gatedToZero: z.boolean().optional(),
+    gateReason: z
+      .enum(["hiring_intent_zero", "employment_type_mismatch", "hard_location_mismatch"])
+      .nullable()
+      .optional(),
   }),
 });
 
@@ -248,6 +276,9 @@ export const ScoringOutputSchema = z.object({
     totalRankedLeads: z.number().int().nonnegative(),
     topLeadIdentityKeys: z.array(z.string().min(1)),
     elapsedMs: z.number().int().nonnegative(),
+    rankingTimeMs: z.number().int().nonnegative().optional(),
+    aggregationTimeMs: z.number().int().nonnegative().optional(),
+    finalizeDecisionTimeMs: z.number().int().nonnegative().optional(),
   }),
 });
 
@@ -270,6 +301,11 @@ export const FinalResponseOutputSchema = z.object({
     message: z.string().min(1),
     suggestion: z.string().optional(),
   }),
+  finalizationDiagnostics: z
+    .object({
+      elapsedMs: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export const AgentStateSchema = z.object({

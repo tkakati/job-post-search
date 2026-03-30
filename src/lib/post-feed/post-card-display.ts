@@ -1,5 +1,6 @@
 import type { LocationDisplayOutput } from "@/lib/location/display";
 import { formatScore, type AuthorTypeLabel } from "@/lib/post-feed/formatters";
+import { classifyMatchStrength } from "@/lib/scoring/thresholds";
 
 type SourceBadge = "retrieved" | "fresh" | "both" | null | undefined;
 
@@ -120,9 +121,10 @@ export function buildPostCardDisplayModel(input: BuildPostCardDisplayInput): Pos
 
   const tags: PostCardDisplayTag[] = [];
   if (typeof input.leadScore === "number" && Number.isFinite(input.leadScore)) {
-    if (input.leadScore >= 0.8) {
+    const matchStrength = classifyMatchStrength(input.leadScore);
+    if (matchStrength === "strong") {
       tags.push({ key: "match_strength", label: "Strong Match", tone: "green" });
-    } else if (input.leadScore >= 0.6) {
+    } else if (matchStrength === "medium") {
       tags.push({ key: "match_strength", label: "Medium Match", tone: "yellow" });
     } else {
       tags.push({ key: "match_strength", label: "Weak Match", tone: "red" });

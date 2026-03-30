@@ -30,7 +30,7 @@ export async function runAgent(input: RunAgentInput) {
     locationIsHardFilter: input.locationIsHardFilter ?? false,
     employmentType: input.employmentType ?? null,
     recencyPreference: input.recencyPreference,
-    maxIterations: input.maxIterations ?? 3,
+    maxIterations: input.maxIterations ?? 2,
     targetHighQualityLeads: input.targetHighQualityLeads ?? 20,
     shownLeadIdentityKeys: input.shownLeadIdentityKeys ?? [],
   });

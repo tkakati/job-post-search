@@ -9,6 +9,7 @@ import { appendDebug } from "@/lib/agent/nodes/helpers";
  * - both: retrieval + fresh generation enabled (retrieval runs first, then retrieval_arm routes onward)
  */
 export async function executionRoutingNode(state: AgentGraphState) {
+  const startedAt = Date.now();
   const enableRetrieval = state.plannerOutput?.enableRetrieval ?? false;
   const enableFresh = state.plannerOutput?.enableNewLeadGeneration ?? false;
   const mode = enableRetrieval && enableFresh
@@ -19,6 +20,9 @@ export async function executionRoutingNode(state: AgentGraphState) {
   const next = enableRetrieval ? "retrieval_arm" : "query_generation";
 
   return {
+    routingDiagnostics: {
+      elapsedMs: Date.now() - startedAt,
+    },
     debugLog: appendDebug(
       state,
       `execution_routing => mode=${mode}, next=${next}, execution_sequence=${

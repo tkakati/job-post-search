@@ -110,7 +110,7 @@ export const DebugRunInputSchema = z.object({
     .optional()
     .default(null),
   recencyPreference: RecencyPreferenceSchema,
-  maxIterations: z.coerce.number().int().positive().max(10).default(3),
+  maxIterations: z.coerce.number().int().positive().max(10).default(2),
   targetHighQualityLeads: z.coerce.number().int().positive().max(20).default(20),
   shownIdentityKeys: z.array(z.string().min(1)).optional().default([]),
 });

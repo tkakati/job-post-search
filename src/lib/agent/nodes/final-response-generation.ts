@@ -10,6 +10,7 @@ const FINAL_RESPONSE_MAX_LEADS = 20;
  * Produces the final user payload from combined results.
  */
 export async function finalResponseGenerationNode(state: AgentGraphState) {
+  const startedAt = Date.now();
   const combined = state.combinedResults;
   const plannerMode = state.plannerOutput?.plannerMode ?? "exploit_heavy";
   const finalizationMode =
@@ -63,6 +64,9 @@ export async function finalResponseGenerationNode(state: AgentGraphState) {
           title: "New leads ready",
           message: "We found new leads for your search.",
         },
+    finalizationDiagnostics: {
+      elapsedMs: Date.now() - startedAt,
+    },
   });
 
   return {

@@ -1,5 +1,6 @@
 import { formatLeadLocationDisplay } from "@/lib/location/display";
 import { primaryLeadLocationText } from "@/lib/location/geo";
+import { qualityBadgeFromScore } from "@/lib/scoring/thresholds";
 import type { LeadCardViewModel, LeadRecord } from "@/lib/types/contracts";
 import { leadDedupKey, leadRichnessScore } from "@/lib/utils/lead-dedupe";
 import { dedupeRedundantLeads } from "@/lib/leads/redundancy";
@@ -9,6 +10,7 @@ type LeadSource = "retrieval" | "fresh_search";
 type LeadProvenanceRow = {
   identityKey: string;
   sources: LeadSource[];
+  isNewForUser: boolean;
 };
 
 export type LeadCardScope = "all" | "retrieval_only";
@@ -56,16 +58,9 @@ function qualityBadgeForLead(lead: {
   hiringIntentScore?: number | null;
 }): LeadCardViewModel["qualityBadge"] {
   if (typeof lead.leadScore === "number") {
-    if (lead.leadScore >= 0.75) return "high";
-    if (lead.leadScore >= 0.5) return "medium";
-    if (lead.leadScore > 0) return "low";
-    return "unscored";
+    return qualityBadgeFromScore(lead.leadScore);
   }
-  const signal = Math.max(lead.hiringIntentScore ?? 0, 0);
-  if (signal >= 0.75) return "high";
-  if (signal >= 0.5) return "medium";
-  if (signal > 0) return "low";
-  return "unscored";
+  return qualityBadgeFromScore(Math.max(lead.hiringIntentScore ?? 0, 0));
 }
 
 function sourceBadgeForProvenance(
@@ -85,12 +80,12 @@ export function buildLeadCardsFromLeads(input: {
 }): LeadCardViewModel[] {
   const scope = input.scope ?? "all";
   const provenanceByIdentity = new Map(
-    (input.leadProvenance ?? []).map((p) => [p.identityKey, p.sources]),
+    (input.leadProvenance ?? []).map((p) => [p.identityKey, p]),
   );
   const selectedEntries: Array<{ lead: LeadRecord; sources: Set<LeadSource> }> = [];
   for (const lead of input.selectedLeads) {
-    const leadSources =
-      provenanceByIdentity.get(lead.identityKey) ?? (["fresh_search"] as const);
+    const provenance = provenanceByIdentity.get(lead.identityKey);
+    const leadSources = provenance?.sources ?? (["fresh_search"] as const);
     if (scope === "retrieval_only" && !leadSources.includes("retrieval")) {
       continue;
     }
@@ -176,6 +171,8 @@ export function buildLeadCardsFromLeads(input: {
 
   return limitedSelected.map(({ lead, sources }) => {
     const sourceBadge = sourceBadgeForProvenance(Array.from(sources));
+    const provenance = provenanceByIdentity.get(lead.identityKey);
+    const isNewForUser = provenance?.isNewForUser === true;
     const meta = lead.sourceMetadataJson as Record<string, unknown> | null | undefined;
     const extractedRole = readExtractionRoleFromSourceMetadata(meta);
     const displayJobTitle = extractedRole ?? readTrimmedString(lead.titleOrRole) ?? "Untitled role";
@@ -228,8 +225,8 @@ export function buildLeadCardsFromLeads(input: {
       sourceBadge,
       provenanceSources: Array.from(sources),
       postedAt: lead.postedAt ?? null,
-      isNewForUser: true,
-      newBadge: "new",
+      isNewForUser,
+      ...(isNewForUser ? { newBadge: "new" as const } : {}),
       qualityBadge: qualityBadgeForLead(lead),
     };
   });

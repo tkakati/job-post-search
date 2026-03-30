@@ -10,6 +10,7 @@ import { getEmbedding } from "../../ai/embeddings";
  * No LLM calls here by design.
  */
 export async function planningPhaseNode(state: AgentGraphState) {
+  const startedAt = Date.now();
   const computedRoleLocationKey = roleLocationKey(state.role, state.location);
   const isFirstIteration = state.iteration === 0;
   const shouldInitRoleEmbedding = !Array.isArray(state.userRoleEmbedding);
@@ -21,9 +22,10 @@ export async function planningPhaseNode(state: AgentGraphState) {
   const n = state.scoringResults?.highQualityLeadsCount ?? 0;
   const avgScore = state.scoringResults?.avgScore ?? 0;
   const signalSource = state.scoringResults ? "scoring_node" : "default_zero_signal";
+  const targetHighQualityLeads = state.targetHighQualityLeads;
   const totalRetrievedCandidates =
     state.retrievalSummarySignal?.totalRetrievedCandidates ?? n;
-  const retrievalShortCircuitTriggered = isFirstIteration && n >= 20;
+  const retrievalShortCircuitTriggered = isFirstIteration && n >= targetHighQualityLeads;
   const planningProfile = retrievalShortCircuitTriggered
     ? "retrieval_only_finalization"
     : "adaptive_exploration";
@@ -60,6 +62,9 @@ export async function planningPhaseNode(state: AgentGraphState) {
           totalRetrievedCandidates: number;
           signalSource: string;
         };
+        planningDiagnostics?: {
+          elapsedMs: number;
+        };
       }
     | null = null;
 
@@ -72,7 +77,7 @@ export async function planningPhaseNode(state: AgentGraphState) {
       rationale: [
         ...rationale,
         "iteration 0 retrieval short-circuit triggered",
-        "retrieval produced >= 20 high-quality leads; skip fresh generation",
+        `retrieval produced >= ${targetHighQualityLeads} high-quality leads; skip fresh generation`,
         "remainingLeadsNeeded=0",
         "selectedFreshQueries=0",
       ],
@@ -81,6 +86,9 @@ export async function planningPhaseNode(state: AgentGraphState) {
         newUnseenRetrievedLeads: n,
         totalRetrievedCandidates,
         signalSource,
+      },
+      planningDiagnostics: {
+        elapsedMs: Date.now() - startedAt,
       },
     };
   } else if (n === 0) {
@@ -92,7 +100,7 @@ export async function planningPhaseNode(state: AgentGraphState) {
       rationale: [
         ...rationale,
         "no useful retrieval leads available",
-        "remainingLeadsNeeded=20",
+        `remainingLeadsNeeded=${targetHighQualityLeads}`,
         "selectedFreshQueries=3",
       ],
       retrievalSummary: {
@@ -101,9 +109,12 @@ export async function planningPhaseNode(state: AgentGraphState) {
         totalRetrievedCandidates,
         signalSource,
       },
+      planningDiagnostics: {
+        elapsedMs: Date.now() - startedAt,
+      },
     };
   } else {
-    const remaining = Math.max(0, 20 - n);
+    const remaining = Math.max(0, targetHighQualityLeads - n);
     const queriesNeeded = Math.ceil(remaining / 5);
     const numQueries = Math.min(3, Math.max(1, queriesNeeded)) as 1 | 2 | 3;
     plannerOutputInput = {
@@ -122,6 +133,9 @@ export async function planningPhaseNode(state: AgentGraphState) {
         newUnseenRetrievedLeads: n,
         totalRetrievedCandidates,
         signalSource,
+      },
+      planningDiagnostics: {
+        elapsedMs: Date.now() - startedAt,
       },
     };
   }

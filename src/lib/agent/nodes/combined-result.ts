@@ -171,6 +171,13 @@ export async function combinedResultNode(state: AgentGraphState) {
   const searchLatencyMs = state.searchResults?.diagnostics?.elapsedMs ?? 0;
   const combineTimeMs = Date.now() - combineStartedAt;
   const totalIterationTimeMs = retrievalLatencyMs + searchLatencyMs + combineTimeMs;
+  const crossSourceRedundancyDroppedCount =
+    retrievalRedundancyDeduped.droppedCount +
+    searchRedundancyDeduped.droppedCount +
+    crossSourceRedundancyDeduped.droppedCount;
+  const countryMismatchDroppedCount =
+    retrievalCountryFiltered.countryMismatchDroppedCount +
+    searchCountryFiltered.countryMismatchDroppedCount;
   const searchCalls = Number(state.searchResults?.providerMetadataJson?.queryCount ?? 0);
   const resultsCount = state.searchResults?.searchDiagnostics?.totalKept ?? 0;
 
@@ -211,6 +218,12 @@ export async function combinedResultNode(state: AgentGraphState) {
       maxIterations: state.maxIterations,
       shownHistoryCount: shown.size,
       dedupedFromMergedCount: mergedLeads.length - combineDedupedLeads.length,
+      retrievalLatencyMs,
+      searchLatencyMs,
+      combineTimeMs,
+      totalIterationTimeMs,
+      crossSourceRedundancyDroppedCount,
+      countryMismatchDroppedCount,
     },
   });
 
@@ -221,7 +234,7 @@ export async function combinedResultNode(state: AgentGraphState) {
     iteration: state.iteration,
     debugLog: appendDebug(
       state,
-      `combined_result => new=${combinedResults.totalNewLeadCountForUser}, deduped=${mergedLeads.length - combineDedupedLeads.length}, redundantDroppedCount=${retrievalRedundancyDeduped.droppedCount + searchRedundancyDeduped.droppedCount + crossSourceRedundancyDeduped.droppedCount}, countryMismatchDroppedCount=${retrievalCountryFiltered.countryMismatchDroppedCount + searchCountryFiltered.countryMismatchDroppedCount}, stopReason=deferred_to_scoring_node, retrievalTimeMs=${retrievalLatencyMs}, searchTimeMs=${searchLatencyMs}, combineTimeMs=${combineTimeMs}, totalIterationTimeMs=${totalIterationTimeMs}, iteration => latency=${totalIterationTimeMs}ms, searchCalls=${searchCalls}, results=${resultsCount}`,
+      `combined_result => new=${combinedResults.totalNewLeadCountForUser}, deduped=${mergedLeads.length - combineDedupedLeads.length}, redundantDroppedCount=${crossSourceRedundancyDroppedCount}, countryMismatchDroppedCount=${countryMismatchDroppedCount}, stopReason=deferred_to_scoring_node, retrievalTimeMs=${retrievalLatencyMs}, searchTimeMs=${searchLatencyMs}, combineTimeMs=${combineTimeMs}, totalIterationTimeMs=${totalIterationTimeMs}, iteration => latency=${totalIterationTimeMs}ms, searchCalls=${searchCalls}, results=${resultsCount}`,
     ),
   };
 }

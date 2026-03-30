@@ -25,7 +25,7 @@ export const AgentGraphStateSchema = z.object({
   userRoleEmbedding: z.array(z.number()).optional(),
 
   iteration: z.number().int().nonnegative(),
-  maxIterations: z.number().int().positive().default(3),
+  maxIterations: z.number().int().positive().default(2),
   targetHighQualityLeads: z.number().int().positive().default(20),
 
   roleLocationKey: z.string().min(1),
@@ -113,7 +113,7 @@ export function createInitialAgentGraphState(input: {
     recencyPreference: parsed.recencyPreference,
     userRoleEmbedding: undefined,
     iteration: 0,
-    maxIterations: input.maxIterations ?? 3,
+    maxIterations: input.maxIterations ?? 2,
     targetHighQualityLeads: input.targetHighQualityLeads ?? 20,
     roleLocationKey: roleLocationKey(parsed.role, parsed.location),
     retrievalSummarySignal: {

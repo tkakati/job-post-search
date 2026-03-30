@@ -13,6 +13,7 @@ import { FinalResponseOutputSchema } from "@/lib/schemas/contracts";
 import { env } from "@/lib/env";
 import { runWithDebugApiCallSink } from "@/lib/debug/api-call-sink";
 import { logger } from "@/lib/observability/logger";
+import type { LeadRecord } from "@/lib/types/contracts";
 
 export const runtime = "nodejs";
 
@@ -46,6 +47,22 @@ function graphFromLangGraphInternals() {
 
 function line(value: unknown) {
   return `${JSON.stringify(value)}\n`;
+}
+
+function buildFreshPreviewLeadCards(normalizedLeads: LeadRecord[]) {
+  const selectedLeads = normalizedLeads.slice(0, 20);
+  const leadProvenance = selectedLeads.map((lead) => ({
+    identityKey: lead.identityKey,
+    sources: ["fresh_search"] as Array<"fresh_search">,
+    isNewForUser: true,
+  }));
+
+  return buildLeadCardsFromLeads({
+    selectedLeads,
+    leadProvenance,
+    maxLeads: 20,
+    scope: "all",
+  });
 }
 
 function summarizeStreamRunError(error: unknown): { code: string; message: string } {
@@ -154,6 +171,7 @@ export async function POST(req: Request) {
         log: string;
       }> = [];
       let hasEmittedInterimResults = false;
+      let hasEmittedFreshPreview = false;
 
       try {
         let apiCallSeq = 0;
@@ -233,6 +251,51 @@ export async function POST(req: Request) {
                 ...state,
                 ...patch,
               });
+
+              if (
+                !hasEmittedFreshPreview &&
+                node === "search" &&
+                state.searchResults &&
+                Array.isArray(state.searchResults.normalizedSearchResults) &&
+                state.searchResults.normalizedSearchResults.length > 0
+              ) {
+                const freshPreviewLeads = buildFreshPreviewLeadCards(
+                  state.searchResults.normalizedSearchResults,
+                );
+
+                if (freshPreviewLeads.length > 0) {
+                  const previewPayload = FinalResponseOutputSchema.parse({
+                    taskComplete: false,
+                    stopReason: null,
+                    plannerMode: state.plannerOutput?.plannerMode ?? "exploit_heavy",
+                    iterationsUsed: state.iteration + 1,
+                    leads: freshPreviewLeads,
+                    summary: `Showing ${freshPreviewLeads.length} fresh posts while extraction and scoring continue.`,
+                    totalCounts: {
+                      retrieved: state.combinedResults?.totalRetrievedCount ?? 0,
+                      generated: state.searchResults.searchDiagnostics.totalKept ?? freshPreviewLeads.length,
+                      merged: state.combinedResults?.totalMergedCount ?? freshPreviewLeads.length,
+                      newForUser: state.combinedResults?.totalNewLeadCountForUser ?? freshPreviewLeads.length,
+                    },
+                    emptyState: {
+                      isEmpty: false,
+                      title: "Fresh posts ready",
+                      message: "Showing fresh posts while deeper extraction and scoring continue.",
+                    },
+                  });
+
+                  controller.enqueue(
+                    encoder.encode(
+                      line({
+                        type: "interim_results",
+                        phase: "fresh_search_preview",
+                        payload: previewPayload,
+                      }),
+                    ),
+                  );
+                  hasEmittedFreshPreview = true;
+                }
+              }
 
               if (
                 !hasEmittedInterimResults &&

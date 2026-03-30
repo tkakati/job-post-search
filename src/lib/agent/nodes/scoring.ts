@@ -4,6 +4,7 @@ import type { LeadRecord } from "@/lib/types/contracts";
 import { appendDebug } from "@/lib/agent/nodes/helpers";
 import { cosineSimilarity, getEmbedding } from "@/lib/ai/embeddings";
 import { authorStrengthScoreFromType, resolveAuthorType } from "@/lib/author/classification";
+import { HIGH_QUALITY_LEAD_THRESHOLD } from "@/lib/scoring/thresholds";
 import {
   coerceLeadLocations,
   hasLocationAlias,
@@ -19,8 +20,15 @@ type ScoreBreakdown = {
   roleMatchScore: number;
   locationMatchScore: number;
   authorStrengthScore: number;
-  engagementScore: number;
+  hiringIntentScore: number;
+  // Backward-compatible alias consumed by legacy UI/debug paths.
+  engagementScore?: number;
   employmentTypeScore: number;
+  baseScore: number;
+  intentBoost: number;
+  finalScore100: number;
+  gatedToZero: boolean;
+  gateReason: "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null;
 };
 
 type LocationScoreDebug = {
@@ -31,7 +39,6 @@ type LocationScoreDebug = {
   explicitResolvableMismatch: boolean;
 };
 
-const HIGH_QUALITY_THRESHOLD = 0.7;
 const ROLE_EMBEDDING_BACKFILL_IN_FLIGHT = new Set<string>();
 
 function clamp01(value: number) {
@@ -250,8 +257,11 @@ function authorStrengthScoreForLead(lead: LeadRecord) {
   };
 }
 
-function engagementScoreForLead(lead: LeadRecord) {
-  return (lead.hiringIntentScore ?? 0) >= 0.5 ? 1 : 0;
+function hiringIntentScoreForLead(lead: LeadRecord) {
+  if (typeof lead.hiringIntentScore === "number" && Number.isFinite(lead.hiringIntentScore)) {
+    return clamp01(lead.hiringIntentScore);
+  }
+  return 0.5;
 }
 
 function employmentTypeFromLead(lead: LeadRecord) {
@@ -290,20 +300,53 @@ function scoreLead(lead: LeadRecord, state: AgentGraphState) {
   const roleScore = roleMatchScoreForLead(lead, state);
   const locationScore = locationMatchScoreForLead(lead, state);
   const authorScore = authorStrengthScoreForLead(lead);
+  const hiringIntentScore = hiringIntentScoreForLead(lead);
+  const employmentTypeScore = employmentTypeScoreForLead(lead, state);
+  const intentBoost = Math.round(clamp01(hiringIntentScore) * 15);
+  const hasHardLocationMismatch =
+    state.locationIsHardFilter && locationScore.explicitResolvableMismatch;
+  let gateReason: ScoreBreakdown["gateReason"] = null;
+  if (hiringIntentScore === 0) {
+    gateReason = "hiring_intent_zero";
+  } else if (employmentTypeScore === 0) {
+    gateReason = "employment_type_mismatch";
+  } else if (hasHardLocationMismatch) {
+    gateReason = "hard_location_mismatch";
+  }
+
+  const isGated = gateReason !== null;
+  const baseScore = isGated
+    ? 0
+    : clamp01(
+        0.55 * Math.pow(roleScore.finalRoleScore, 1.5) +
+          0.25 * locationScore.score +
+          0.2 * authorScore.authorStrengthScore,
+      );
+
+  let finalScore100 = 0;
+  if (!isGated) {
+    let weightedScore100 = baseScore * 100 + intentBoost;
+    if (!state.locationIsHardFilter && locationScore.score < 0.5) {
+      weightedScore100 *= 0.75;
+    }
+    finalScore100 = Math.max(0, Math.min(100, weightedScore100));
+  }
+
   const breakdown: ScoreBreakdown = {
     roleMatchScore: roleScore.finalRoleScore,
     locationMatchScore: locationScore.score,
     authorStrengthScore: authorScore.authorStrengthScore,
-    engagementScore: engagementScoreForLead(lead),
-    employmentTypeScore: employmentTypeScoreForLead(lead, state),
+    hiringIntentScore,
+    employmentTypeScore,
+    baseScore,
+    intentBoost,
+    finalScore100,
+    gatedToZero: isGated,
+    gateReason,
   };
+  breakdown.engagementScore = breakdown.hiringIntentScore;
 
-  const leadScore = clamp01(
-    (0.4 * breakdown.roleMatchScore +
-      0.3 * breakdown.locationMatchScore +
-      0.3 * breakdown.authorStrengthScore) *
-      (breakdown.engagementScore * breakdown.employmentTypeScore),
-  );
+  const leadScore = clamp01(finalScore100 / 100);
   return {
     leadScore,
     scoreBreakdown: breakdown,
@@ -325,43 +368,42 @@ export async function scoringNode(state: AgentGraphState) {
     state.extractionResults != null;
   const isInitialRetrievalScoring = isFirstIteration && !hasFreshQueriesExecutedYet;
 
+  const rankingStartedAt = Date.now();
   const rankedLeads = inputLeads
     .map((lead) => ({ ...lead, ...scoreLead(lead, state) }))
     .sort((a, b) => b.leadScore - a.leadScore);
   const topLeads = rankedLeads.slice(0, 20);
+  const rankingTimeMs = Date.now() - rankingStartedAt;
+  const aggregationStartedAt = Date.now();
   const highQualityLeadsCount = rankedLeads.filter(
-    (lead) => lead.leadScore >= HIGH_QUALITY_THRESHOLD,
+    (lead) => lead.leadScore >= HIGH_QUALITY_LEAD_THRESHOLD,
   ).length;
   const avgScore =
     rankedLeads.length > 0
       ? rankedLeads.reduce((acc, lead) => acc + lead.leadScore, 0) / rankedLeads.length
       : 0;
+  const aggregationTimeMs = Date.now() - aggregationStartedAt;
 
   const persistedLeadScores = 0;
 
+  const finalizeDecisionStartedAt = Date.now();
   const targetHighQualityLeads = state.targetHighQualityLeads;
   const reachedQualityTarget = highQualityLeadsCount >= targetHighQualityLeads;
   const reachedIterationLimit = state.iteration + 1 >= state.maxIterations;
-  const taskComplete = isInitialRetrievalScoring
-    ? false
-    : reachedQualityTarget || reachedIterationLimit;
-  const stopReason = isInitialRetrievalScoring
-    ? null
-    : taskComplete
-      ? reachedQualityTarget
-        ? "sufficient_high_quality_leads"
-        : "max_iterations"
-      : null;
+  const taskComplete = reachedQualityTarget || reachedIterationLimit;
+  const stopReason = taskComplete
+    ? reachedQualityTarget
+      ? "sufficient_high_quality_leads"
+      : "max_iterations"
+    : null;
   const scoringProfile = isInitialRetrievalScoring
     ? "initial_retrieval_scoring"
     : taskComplete && state.plannerOutput?.enableNewLeadGeneration === false
       ? "retrieval_only_finalization"
       : "adaptive_exploration";
-  const nextIteration = isInitialRetrievalScoring
-    ? state.iteration
-    : taskComplete
-      ? state.iteration
-      : state.iteration + 1;
+  const nextIteration =
+    isInitialRetrievalScoring || taskComplete ? state.iteration : state.iteration + 1;
+  const finalizeDecisionTimeMs = Date.now() - finalizeDecisionStartedAt;
 
   const scoringResults = ScoringOutputSchema.parse({
     roleLocationKey: state.roleLocationKey,
@@ -376,6 +418,9 @@ export async function scoringNode(state: AgentGraphState) {
       totalRankedLeads: rankedLeads.length,
       topLeadIdentityKeys: topLeads.map((lead) => lead.identityKey),
       elapsedMs: Date.now() - startedAt,
+      rankingTimeMs,
+      aggregationTimeMs,
+      finalizeDecisionTimeMs,
     },
   });
 

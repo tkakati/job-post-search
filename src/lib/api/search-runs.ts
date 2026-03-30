@@ -20,6 +20,7 @@ import {
 import { z } from "zod";
 import { canonicalLeadIdentity } from "@/lib/utils/lead-identity";
 import { daysToRecencyPreference, recencyPreferenceToDays } from "@/lib/utils/recency";
+import { qualityBadgeFromScore } from "@/lib/scoring/thresholds";
 
 type SearchRunEnvelope = z.infer<typeof SearchRunEnvelopeSchema>;
 type SearchRunResult = z.infer<typeof SearchRunResultSchema>;
@@ -73,11 +74,7 @@ export async function purgeExpiredLeads(input?: { olderThanDays?: number }) {
 function mapQualityBadge(
   score: number | null | undefined,
 ): LeadCardViewModel["qualityBadge"] {
-  const v = score ?? 0;
-  if (v >= 0.75) return "high";
-  if (v >= 0.5) return "medium";
-  if (v > 0) return "low";
-  return "unscored";
+  return qualityBadgeFromScore(score);
 }
 
 function parseCardMetadata(

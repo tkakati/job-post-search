@@ -63,7 +63,7 @@ const EnvSchema = z.object({
 
   // Tuning for bounded iteration loop.
   JOB_DISCOVERY_TARGET_NEW_LEADS: z.coerce.number().int().positive().default(20),
-  JOB_DISCOVERY_MAX_ITERATIONS: z.coerce.number().int().positive().default(3),
+  JOB_DISCOVERY_MAX_ITERATIONS: z.coerce.number().int().positive().default(2),
 
   NEXT_PUBLIC_APP_URL: OptionalUrlSchema,
   PLAYWRIGHT_BASE_URL: OptionalUrlSchema,
@@ -92,7 +92,7 @@ export const env: z.infer<typeof EnvSchema> = parsed.success
       APIFY_AGENT_ENABLED: false,
       EMBEDDING_DIMENSIONS: 1536,
       JOB_DISCOVERY_TARGET_NEW_LEADS: 20,
-      JOB_DISCOVERY_MAX_ITERATIONS: 3,
+      JOB_DISCOVERY_MAX_ITERATIONS: 2,
       NEXT_PUBLIC_APP_URL: undefined,
       PLAYWRIGHT_BASE_URL: undefined,
     };

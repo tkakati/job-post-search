@@ -10,8 +10,8 @@ import { buildExtractionPrompt } from "@/lib/agent/nodes/prompts/extraction-prom
 import { canonicalLeadIdentity } from "@/lib/utils/lead-identity";
 import { parseRawLocationText } from "@/lib/location/geo";
 import { dbClient } from "@/lib/db";
-import { leads } from "@/lib/db/schema";
-import { inArray, or } from "drizzle-orm";
+import { leadSources, leads } from "@/lib/db/schema";
+import { eq, inArray, or } from "drizzle-orm";
 import {
   resolveLinkedinPostContext,
   type LinkedinPostContext,
@@ -270,7 +270,13 @@ function readStoredPostContext(raw: Record<string, unknown>): LinkedinPostContex
 
 async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
   if (leadsIn.length === 0) {
-    return { attempted: 0, inserted: 0, skippedExisting: 0, updated: 0 };
+    return {
+      attempted: 0,
+      inserted: 0,
+      skippedExisting: 0,
+      updated: 0,
+      sourceLinksInserted: 0,
+    };
   }
 
   const dedupedByCanonicalUrl = new Map<string, LeadRecord>();
@@ -292,6 +298,7 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
   const db = dbClient();
   const existing = await db
     .select({
+      id: leads.id,
       canonicalUrl: leads.canonicalUrl,
       identityKey: leads.identityKey,
     })
@@ -301,12 +308,42 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
     );
 
   const existingByCanonicalUrl = new Map(existing.map((row) => [row.canonicalUrl, row]));
-  const existingIdentityKeys = new Set(existing.map((row) => row.identityKey));
-  const toInsert = deduped.filter(
-    (lead) =>
-      !existingByCanonicalUrl.has(lead.canonicalUrl) && !existingIdentityKeys.has(lead.identityKey),
-  );
-  const skippedExisting = deduped.length - toInsert.length;
+  const existingByIdentityKey = new Map(existing.map((row) => [row.identityKey, row]));
+  const toInsert: LeadRecord[] = [];
+  const toUpdate: Array<{ id: number; lead: LeadRecord }> = [];
+  for (const lead of deduped) {
+    const matched =
+      existingByCanonicalUrl.get(lead.canonicalUrl) ??
+      existingByIdentityKey.get(lead.identityKey);
+    if (!matched) {
+      toInsert.push(lead);
+      continue;
+    }
+    toUpdate.push({ id: matched.id, lead });
+  }
+
+  const toDbLeadValues = (lead: LeadRecord) => ({
+    identityKey: lead.identityKey,
+    sourceType: lead.sourceType ?? "linkedin-content",
+    titleOrRole: lead.titleOrRole,
+    company: lead.company ?? null,
+    location: lead.rawLocationText ?? null,
+    normalizedLocationJson: lead.normalizedLocationJson ?? {
+      locations: lead.locations ?? [],
+    },
+    employmentType: lead.employmentType ?? null,
+    workMode: lead.workMode ?? null,
+    author: lead.author ?? null,
+    snippet: lead.snippet ?? null,
+    fullText: lead.fullText ?? null,
+    postedAt: lead.postedAt ? new Date(lead.postedAt) : null,
+    fetchedAt: lead.fetchedAt ? new Date(lead.fetchedAt) : new Date(),
+    roleEmbedding: lead.roleEmbedding ?? null,
+    hiringIntentScore: lead.hiringIntentScore ?? null,
+    leadScore: lead.leadScore ?? null,
+    roleLocationKey: lead.roleLocationKey,
+    sourceMetadataJson: lead.sourceMetadataJson ?? null,
+  });
 
   if (toInsert.length > 0) {
     await db
@@ -314,36 +351,79 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
       .values(
         toInsert.map((lead) => ({
           canonicalUrl: lead.canonicalUrl,
-          identityKey: lead.identityKey,
-          sourceType: lead.sourceType ?? "linkedin-content",
-          titleOrRole: lead.titleOrRole,
-          company: lead.company ?? null,
-          location: lead.rawLocationText ?? null,
-          normalizedLocationJson: lead.normalizedLocationJson ?? {
-            locations: lead.locations ?? [],
-          },
-          employmentType: lead.employmentType ?? null,
-          workMode: lead.workMode ?? null,
-          author: lead.author ?? null,
-          snippet: lead.snippet ?? null,
-          fullText: lead.fullText ?? null,
-          postedAt: lead.postedAt ? new Date(lead.postedAt) : null,
-          fetchedAt: lead.fetchedAt ? new Date(lead.fetchedAt) : new Date(),
-          roleEmbedding: lead.roleEmbedding ?? null,
-          hiringIntentScore: lead.hiringIntentScore ?? null,
-          leadScore: lead.leadScore ?? null,
-          roleLocationKey: lead.roleLocationKey,
-          sourceMetadataJson: lead.sourceMetadataJson ?? null,
+          ...toDbLeadValues(lead),
         })),
       )
       .onConflictDoNothing();
   }
 
+  if (toUpdate.length > 0) {
+    await Promise.all(
+      toUpdate.map(({ id, lead }) =>
+        db
+          .update(leads)
+          .set({
+            ...toDbLeadValues(lead),
+            updatedAt: new Date(),
+          })
+          .where(eq(leads.id, id)),
+      ),
+    );
+  }
+
+  const persistedRows = await db
+    .select({
+      id: leads.id,
+      canonicalUrl: leads.canonicalUrl,
+      identityKey: leads.identityKey,
+    })
+    .from(leads)
+    .where(
+      or(inArray(leads.canonicalUrl, canonicalUrls), inArray(leads.identityKey, identityKeys)),
+    );
+  const idByCanonicalUrl = new Map(persistedRows.map((row) => [row.canonicalUrl, row.id]));
+  const idByIdentityKey = new Map(persistedRows.map((row) => [row.identityKey, row.id]));
+
+  const sourceRows = deduped
+    .map((lead) => {
+      const leadId =
+        idByCanonicalUrl.get(lead.canonicalUrl) ?? idByIdentityKey.get(lead.identityKey);
+      if (!leadId) return null;
+      const sourceMetadata =
+        lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
+          ? (lead.sourceMetadataJson as Record<string, unknown>)
+          : null;
+      const sourceQuery =
+        sourceMetadata && typeof sourceMetadata.sourceQuery === "string"
+          ? sourceMetadata.sourceQuery
+          : null;
+      const sourceInputUrl =
+        sourceMetadata && typeof sourceMetadata.sourceUrl === "string"
+          ? sourceMetadata.sourceUrl
+          : null;
+      return {
+        leadId,
+        sourceProvider: "apify-linkedin-content",
+        sourceQuery,
+        sourceUrl: lead.canonicalUrl,
+        sourceInputUrl,
+        sourceMetadataJson: {
+          roleLocationKey: lead.roleLocationKey,
+        } as Record<string, unknown>,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+
+  if (sourceRows.length > 0) {
+    await db.insert(leadSources).values(sourceRows).onConflictDoNothing();
+  }
+
   return {
     attempted: deduped.length,
     inserted: toInsert.length,
-    skippedExisting,
-    updated: 0,
+    skippedExisting: 0,
+    updated: toUpdate.length,
+    sourceLinksInserted: sourceRows.length,
   };
 }
 
@@ -787,6 +867,11 @@ export async function extractionNode(state: AgentGraphState) {
       ? extractedLeads.reduce((acc, x) => acc + (x.roleMatchScore + x.locationMatchScore) / 2, 0) /
         extractedLeads.length
       : 0;
+  const batchElapsedMs = batchOutputs.map((b) => b.meta.elapsedMs).filter((value) => value >= 0);
+  const extractionLatencyP50 = percentile(batchElapsedMs, 0.5);
+  const extractionLatencyP90 = percentile(batchElapsedMs, 0.9);
+  const llmBatchCount = batchOutputs.filter((batch) => batch.meta.usedLlm).length;
+  const fallbackBatchCount = Math.max(0, batchOutputs.length - llmBatchCount);
 
   const extractionResults = ExtractionOutputSchema.parse({
     roleLocationKey: state.roleLocationKey,
@@ -824,6 +909,11 @@ export async function extractionNode(state: AgentGraphState) {
           : avgScore,
       ),
       elapsedMs: Date.now() - startedAt,
+      batchCount: batchOutputs.length,
+      extractionLatencyP50Ms: extractionLatencyP50,
+      extractionLatencyP90Ms: extractionLatencyP90,
+      llmBatchCount,
+      fallbackBatchCount,
       batches: batchOutputs.map((b) => b.meta),
     },
   });
@@ -862,10 +952,6 @@ export async function extractionNode(state: AgentGraphState) {
       withReason: 0,
     },
   );
-  const batchElapsedMs = batchOutputs.map((b) => b.meta.elapsedMs).filter((value) => value >= 0);
-  const extractionLatencyP50 = percentile(batchElapsedMs, 0.5);
-  const extractionLatencyP90 = percentile(batchElapsedMs, 0.9);
-
   return {
     extractionResults,
     debugLog: appendDebug(

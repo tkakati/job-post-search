@@ -61,7 +61,7 @@ export const LeadCardViewModelSchema = z.object({
   provenanceSources: z.array(z.enum(["retrieval", "fresh_search"])).min(1),
   postedAt: IsoDateStringSchema.nullable().optional(),
   isNewForUser: z.boolean(),
-  newBadge: z.literal("new"),
+  newBadge: z.literal("new").optional(),
   qualityBadge: z.enum(["high", "medium", "low", "unscored"]).optional(),
 });
 

@@ -30,6 +30,7 @@ import {
   type PostReviewStatus,
 } from "@/lib/post-feed/status";
 import { dedupeRedundantLeads } from "@/lib/leads/redundancy";
+import { classifyMatchStrength } from "@/lib/scoring/thresholds";
 
 const STAGES = [
   "planning_phase",
@@ -122,6 +123,13 @@ type LiveLogEntry = {
   message: string;
 };
 
+type GraphSequenceEvent = {
+  step: number;
+  node: string;
+  phase: "started" | "completed";
+  log: string;
+};
+
 type LiveApiCallRow = {
   id: number;
   at: string;
@@ -160,8 +168,13 @@ type PostFeedRow = {
   roleMatchScore: number | null;
   locationMatchScore: number | null;
   authorStrengthScore: number | null;
-  engagementScore: number | null;
+  hiringIntentScore: number | null;
   employmentTypeScore: number | null;
+  baseScore: number | null;
+  intentBoost: number | null;
+  finalScore100: number | null;
+  gatedToZero: boolean;
+  gateReason: "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null;
   isNew: boolean;
   fullText: string | null;
   whyMatched: string[];
@@ -427,19 +440,25 @@ function extractShownIdentityKeys(leads: FinalLeadCard[]): string[] {
   );
 }
 
+function extractMergeKeysFromLeads(leads: FinalLeadCard[]): Set<string> {
+  const keys = new Set<string>();
+  for (const lead of leads) {
+    const mergeKey = resolveLeadMergeKey(lead);
+    if (mergeKey) keys.add(mergeKey);
+  }
+  return keys;
+}
+
 function mergeNetNewLeads(
   existing: FinalLeadCard[],
   incoming: FinalLeadCard[],
-): { merged: FinalLeadCard[]; addedCount: number } {
+): { merged: FinalLeadCard[]; addedCount: number; addedKeys: string[] } {
   const normalizedExisting = dedupeFinalLeadCardsByRedundancy(existing).deduped;
-  if (incoming.length === 0) return { merged: normalizedExisting, addedCount: 0 };
+  if (incoming.length === 0) return { merged: normalizedExisting, addedCount: 0, addedKeys: [] };
 
   const merged = [...normalizedExisting];
-  const seenKeys = new Set(
-    normalizedExisting
-      .map((lead) => resolveLeadMergeKey(lead))
-      .filter((key): key is string => Boolean(key)),
-  );
+  const existingKeys = extractMergeKeysFromLeads(normalizedExisting);
+  const seenKeys = new Set(existingKeys);
 
   for (const lead of incoming) {
     const mergeKey = resolveLeadMergeKey(lead);
@@ -450,8 +469,10 @@ function mergeNetNewLeads(
 
   const mergedAfterRedundancy = dedupeFinalLeadCardsByRedundancy(merged).deduped;
   const addedCount = Math.max(0, mergedAfterRedundancy.length - normalizedExisting.length);
+  const mergedKeys = extractMergeKeysFromLeads(mergedAfterRedundancy);
+  const addedKeys = Array.from(mergedKeys).filter((key) => !existingKeys.has(key));
 
-  return { merged: mergedAfterRedundancy, addedCount };
+  return { merged: mergedAfterRedundancy, addedCount, addedKeys };
 }
 
 const AGENT_APIFY_MAX_ITEMS_PER_CALL = 10;
@@ -463,6 +484,14 @@ const RUNNING_FEED_STATUS_WITH_RESULTS_COPY =
   "Showing retrieved matches from database while we find more posts… ETA ~2 min";
 const RUNNING_FEED_STATUS_EMPTY_COPY =
   "We are working on finding you relevant posts… ETA ~2 min";
+
+function formatPlannerModeLabel(value: unknown): string {
+  if (value === "full_explore") return "Full explore";
+  if (value === "explore_heavy") return "Explore heavy";
+  if (value === "exploit_heavy") return "Exploit heavy";
+  return "Unknown";
+}
+
 const DEFAULT_POST_FEED_FILTERS: PostFeedFilterState = {
   role: "",
   location: "",
@@ -479,6 +508,15 @@ const DEFAULT_POST_FEED_FILTERS: PostFeedFilterState = {
 function normalizeLowerText(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.trim().toLowerCase();
+}
+
+function normalizeScoreGateReason(
+  value: unknown,
+): "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null {
+  if (value === "hiring_intent_zero") return value;
+  if (value === "employment_type_mismatch") return value;
+  if (value === "hard_location_mismatch") return value;
+  return null;
 }
 
 function readIdentityKey(value: unknown): string | null {
@@ -548,10 +586,7 @@ function normalizePosterTypeValue(value: AuthorTypeLabel): Exclude<PostFeedPoste
 function normalizeMatchStrengthValue(
   score: number | null | undefined,
 ): Exclude<PostFeedMatchStrengthFilter, "any"> {
-  if (typeof score !== "number" || !Number.isFinite(score)) return "unscored";
-  if (score >= 0.8) return "strong";
-  if (score >= 0.6) return "medium";
-  return "weak";
+  return classifyMatchStrength(score);
 }
 
 function recencyToWindowMs(recency: PostFeedRecencyFilter): number | null {
@@ -571,13 +606,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   const [recencyPreference, setRecencyPreference] = React.useState<
     "past-24h" | "past-week" | "past-month"
   >("past-week");
-  const [maxIterations, setMaxIterations] = React.useState(1);
+  const [maxIterations, setMaxIterations] = React.useState(2);
   const [isRunning, setIsRunning] = React.useState(false);
   const [activeStage, setActiveStage] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<DebugRunOutput | null>(null);
   const [interimFinalResponse, setInterimFinalResponse] =
     React.useState<InterimFinalResponse | null>(null);
   const [liveLogEntries, setLiveLogEntries] = React.useState<LiveLogEntry[]>([]);
+  const [liveSequence, setLiveSequence] = React.useState<GraphSequenceEvent[]>([]);
   const [nodewiseExplanation, setNodewiseExplanation] = React.useState<{
     summary: string;
     inputs: string[];
@@ -600,6 +636,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   const [activeSearchKey, setActiveSearchKey] = React.useState<string>("");
   const [lastRunNewLeadCount, setLastRunNewLeadCount] = React.useState<number | null>(null);
   const [runStartedWithExistingFeed, setRunStartedWithExistingFeed] = React.useState(false);
+  const [runNewLeadKeys, setRunNewLeadKeys] = React.useState<Record<string, true>>({});
   const [postFeedStatuses, setPostFeedStatuses] = React.useState<Record<string, PostReviewStatus>>(
     {},
   );
@@ -781,7 +818,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       Array<{ step: number; phase: "started" | "completed"; log: string; seqIndex: number }>
     >();
     for (const stage of STAGES) map.set(stage, []);
-    for (const [seqIndex, item] of (result?.sequence ?? []).entries()) {
+    for (const [seqIndex, item] of (isRunning ? liveSequence : (result?.sequence ?? [])).entries()) {
       const key = STAGES.includes(item.node) ? item.node : "unknown";
       if (!map.has(key)) map.set(key, []);
       map.get(key)?.push({
@@ -792,7 +829,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       });
     }
     return map;
-  }, [result]);
+  }, [result, isRunning, liveSequence]);
 
   const groupedNodeRuns = React.useMemo(() => {
     const map = new Map<
@@ -839,7 +876,11 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         node === "planning_phase"
           ? `Role=${String(inputObj.role ?? "")}, location=${String(inputObj.location ?? "")}, iteration=${String(inputObj.iteration ?? 0)}`
           : node === "query_generation"
-            ? `Planner mode=${String(inputObj.plannerOutput ? ((inputObj.plannerOutput as Record<string, unknown>).plannerMode ?? "unknown") : "unknown")}`
+            ? `Planner mode=${formatPlannerModeLabel(
+                inputObj.plannerOutput
+                  ? (inputObj.plannerOutput as Record<string, unknown>).plannerMode
+                  : null,
+              )}`
             : node === "search"
               ? `Queries=${Array.isArray((inputObj.generatedQueries as Record<string, unknown>)?.queries) ? ((inputObj.generatedQueries as Record<string, unknown>).queries as unknown[]).length : 0}`
               : node === "extraction_node"
@@ -850,7 +891,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
       const outputSummary =
         node === "planning_phase"
-          ? `Mode=${String((outputObj.plannerOutput as Record<string, unknown> | undefined)?.plannerMode ?? "n/a")}`
+          ? `Mode=${formatPlannerModeLabel(
+              (outputObj.plannerOutput as Record<string, unknown> | undefined)?.plannerMode ?? null,
+            )}`
           : node === "query_generation"
             ? `Generated ${(outputObj.generatedQueries as Record<string, unknown> | undefined)?.queries && Array.isArray((outputObj.generatedQueries as Record<string, unknown>).queries) ? ((outputObj.generatedQueries as Record<string, unknown>).queries as unknown[]).length : 0} queries`
             : node === "search"
@@ -962,11 +1005,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       })
       .filter((item) => item.length > 0);
 
+    const plannerMode = plannerOutput?.plannerMode ?? null;
     return {
       iteration,
       highQualityLeadsCount,
       targetHighQualityLeads,
-      plannerMode: plannerOutput?.plannerMode ?? "n/a",
+      plannerMode,
+      plannerModeLabel: formatPlannerModeLabel(plannerMode),
       enableRetrieval:
         typeof plannerOutput?.enableRetrieval === "boolean" ? plannerOutput.enableRetrieval : null,
       enableNewLeadGeneration:
@@ -1062,38 +1107,83 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   }, [result]);
 
   const iterationTimingRows = React.useMemo(() => {
-    const rows = new Map<
-      number,
-      {
-        iteration: number;
-        planningPhaseMs: number | null;
-        executionRoutingMs: number | null;
-        retrievalArmMs: number | null;
-        queryGenerationMs: number | null;
-        searchMs: number | null;
-        extractionMs: number | null;
-        combinedResultMs: number | null;
-        scoringMs: number | null;
-        finalResponseMs: number | null;
-      }
-    >();
+    type IterationTimingRow = {
+      iteration: number;
+      planningTotalMs: number | null;
+      routingTotalMs: number | null;
+      retrievalTotalMs: number | null;
+      queryGenerationTotalMs: number | null;
+      searchTotalMs: number | null;
+      searchQueryFanoutMs: number | null;
+      searchProfileEnrichmentMs: number | null;
+      searchPersistenceUpdateMs: number | null;
+      searchProviderCallTimeMs: number | null;
+      extractionTotalMs: number | null;
+      extractionBatchCount: number | null;
+      extractionP50BatchMs: number | null;
+      extractionP90BatchMs: number | null;
+      extractionLlmBatchCount: number | null;
+      extractionFallbackBatchCount: number | null;
+      combineTotalMs: number | null;
+      combineRetrievalComponentMs: number | null;
+      combineSearchComponentMs: number | null;
+      combineMergeComputeMs: number | null;
+      scoringTotalMs: number | null;
+      scoringRankingMs: number | null;
+      scoringAggregationMs: number | null;
+      scoringFinalizeDecisionMs: number | null;
+      finalResponseTotalMs: number | null;
+    };
 
-    const ensure = (iteration: number) => {
+    const rows = new Map<number, IterationTimingRow>();
+    const ensure = (iteration: number): IterationTimingRow => {
       if (!rows.has(iteration)) {
         rows.set(iteration, {
           iteration,
-          planningPhaseMs: null,
-          executionRoutingMs: null,
-          retrievalArmMs: null,
-          queryGenerationMs: null,
-          searchMs: null,
-          extractionMs: null,
-          combinedResultMs: null,
-          scoringMs: null,
-          finalResponseMs: null,
+          planningTotalMs: null,
+          routingTotalMs: null,
+          retrievalTotalMs: null,
+          queryGenerationTotalMs: null,
+          searchTotalMs: null,
+          searchQueryFanoutMs: null,
+          searchProfileEnrichmentMs: null,
+          searchPersistenceUpdateMs: null,
+          searchProviderCallTimeMs: null,
+          extractionTotalMs: null,
+          extractionBatchCount: null,
+          extractionP50BatchMs: null,
+          extractionP90BatchMs: null,
+          extractionLlmBatchCount: null,
+          extractionFallbackBatchCount: null,
+          combineTotalMs: null,
+          combineRetrievalComponentMs: null,
+          combineSearchComponentMs: null,
+          combineMergeComputeMs: null,
+          scoringTotalMs: null,
+          scoringRankingMs: null,
+          scoringAggregationMs: null,
+          scoringFinalizeDecisionMs: null,
+          finalResponseTotalMs: null,
         });
       }
       return rows.get(iteration)!;
+    };
+
+    const readNumber = (value: unknown, path: Array<string>): number | null => {
+      let cur: unknown = value;
+      for (const key of path) {
+        if (!cur || typeof cur !== "object") return null;
+        cur = (cur as Record<string, unknown>)[key];
+      }
+      return typeof cur === "number" && Number.isFinite(cur) ? cur : null;
+    };
+    const readArrayLength = (value: unknown, path: Array<string>): number | null => {
+      let cur: unknown = value;
+      for (const key of path) {
+        if (!cur || typeof cur !== "object") return null;
+        cur = (cur as Record<string, unknown>)[key];
+      }
+      return Array.isArray(cur) ? cur.length : null;
     };
 
     for (const run of result?.nodeRuns ?? []) {
@@ -1104,67 +1194,146 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       const iteration = typeof inputObj.iteration === "number" ? inputObj.iteration : 0;
       const row = ensure(iteration);
 
-      const extractionDiagnostics =
-        outputObj.extractionResults && typeof outputObj.extractionResults === "object"
-          ? (outputObj.extractionResults as Record<string, unknown>).extractionDiagnostics
-          : null;
-      const scoringDiagnostics =
-        outputObj.scoringResults && typeof outputObj.scoringResults === "object"
-          ? (outputObj.scoringResults as Record<string, unknown>).scoringDiagnostics
-          : null;
-
-      const readMs = (value: unknown, path: Array<string>): number | null => {
-        let cur: unknown = value;
-        for (const key of path) {
-          if (!cur || typeof cur !== "object") return null;
-          cur = (cur as Record<string, unknown>)[key];
-        }
-        return typeof cur === "number" ? cur : null;
-      };
-
       switch (run.node) {
         case "planning_phase":
-          row.planningPhaseMs = readMs(outputObj, ["plannerOutput", "rationale", "elapsedMs"]);
+          row.planningTotalMs = readNumber(outputObj, [
+            "plannerOutput",
+            "planningDiagnostics",
+            "elapsedMs",
+          ]);
           break;
         case "execution_routing":
-          row.executionRoutingMs = 0;
+          row.routingTotalMs = readNumber(outputObj, ["routingDiagnostics", "elapsedMs"]);
           break;
         case "retrieval_arm":
-          row.retrievalArmMs = readMs(outputObj, [
+          row.retrievalTotalMs = readNumber(outputObj, [
             "retrievalResults",
             "retrievalDiagnostics",
             "elapsedMs",
           ]);
           break;
         case "query_generation":
-          row.queryGenerationMs = readMs(outputObj, [
+          row.queryGenerationTotalMs = readNumber(outputObj, [
             "generatedQueries",
             "queryGenerationDiagnostics",
             "elapsedMs",
           ]);
           break;
         case "search":
-          row.searchMs = readMs(outputObj, ["searchResults", "diagnostics", "elapsedMs"]);
+          row.searchTotalMs = readNumber(outputObj, ["searchResults", "diagnostics", "elapsedMs"]);
+          row.searchQueryFanoutMs =
+            readNumber(outputObj, ["searchResults", "searchDiagnostics", "queryFanoutMs"]) ??
+            readNumber(outputObj, [
+              "searchResults",
+              "providerMetadataJson",
+              "iterationMetrics",
+              "queryFanoutMs",
+            ]);
+          row.searchProfileEnrichmentMs =
+            readNumber(outputObj, ["searchResults", "searchDiagnostics", "profileEnrichmentMs"]) ??
+            readNumber(outputObj, [
+              "searchResults",
+              "providerMetadataJson",
+              "iterationMetrics",
+              "profileEnrichmentMs",
+            ]);
+          row.searchPersistenceUpdateMs =
+            readNumber(outputObj, ["searchResults", "searchDiagnostics", "persistenceUpdateMs"]) ??
+            readNumber(outputObj, [
+              "searchResults",
+              "providerMetadataJson",
+              "iterationMetrics",
+              "persistenceUpdateMs",
+            ]);
+          row.searchProviderCallTimeMs = readNumber(outputObj, [
+            "searchResults",
+            "searchDiagnostics",
+            "apifyCallTime",
+          ]);
           break;
-        case "extraction_node":
-          row.extractionMs =
-            readMs(extractionDiagnostics, ["elapsedMs"]) ??
-            readMs(outputObj, ["extractionResults", "extractionDiagnostics", "elapsedMs"]);
+        case "extraction_node": {
+          row.extractionTotalMs = readNumber(outputObj, [
+            "extractionResults",
+            "extractionDiagnostics",
+            "elapsedMs",
+          ]);
+          row.extractionBatchCount =
+            readNumber(outputObj, ["extractionResults", "extractionDiagnostics", "batchCount"]) ??
+            readArrayLength(outputObj, ["extractionResults", "extractionDiagnostics", "batches"]);
+          row.extractionP50BatchMs = readNumber(outputObj, [
+            "extractionResults",
+            "extractionDiagnostics",
+            "extractionLatencyP50Ms",
+          ]);
+          row.extractionP90BatchMs = readNumber(outputObj, [
+            "extractionResults",
+            "extractionDiagnostics",
+            "extractionLatencyP90Ms",
+          ]);
+          row.extractionLlmBatchCount = readNumber(outputObj, [
+            "extractionResults",
+            "extractionDiagnostics",
+            "llmBatchCount",
+          ]);
+          row.extractionFallbackBatchCount = readNumber(outputObj, [
+            "extractionResults",
+            "extractionDiagnostics",
+            "fallbackBatchCount",
+          ]);
           break;
+        }
         case "combined_result":
-          row.combinedResultMs = readMs(outputObj, [
+          row.combineTotalMs =
+            readNumber(outputObj, [
+              "combinedResults",
+              "combinedDiagnostics",
+              "totalIterationTimeMs",
+            ]) ??
+            readNumber(outputObj, ["combinedResults", "combinedDiagnostics", "combineTimeMs"]);
+          row.combineRetrievalComponentMs = readNumber(outputObj, [
             "combinedResults",
             "combinedDiagnostics",
-            "totalIterationTimeMs",
+            "retrievalLatencyMs",
+          ]);
+          row.combineSearchComponentMs = readNumber(outputObj, [
+            "combinedResults",
+            "combinedDiagnostics",
+            "searchLatencyMs",
+          ]);
+          row.combineMergeComputeMs = readNumber(outputObj, [
+            "combinedResults",
+            "combinedDiagnostics",
+            "combineTimeMs",
           ]);
           break;
         case "scoring_node":
-          row.scoringMs =
-            readMs(scoringDiagnostics, ["elapsedMs"]) ??
-            readMs(outputObj, ["scoringResults", "scoringDiagnostics", "elapsedMs"]);
+          row.scoringTotalMs = readNumber(outputObj, [
+            "scoringResults",
+            "scoringDiagnostics",
+            "elapsedMs",
+          ]);
+          row.scoringRankingMs = readNumber(outputObj, [
+            "scoringResults",
+            "scoringDiagnostics",
+            "rankingTimeMs",
+          ]);
+          row.scoringAggregationMs = readNumber(outputObj, [
+            "scoringResults",
+            "scoringDiagnostics",
+            "aggregationTimeMs",
+          ]);
+          row.scoringFinalizeDecisionMs = readNumber(outputObj, [
+            "scoringResults",
+            "scoringDiagnostics",
+            "finalizeDecisionTimeMs",
+          ]);
           break;
         case "final_response_generation":
-          row.finalResponseMs = 0;
+          row.finalResponseTotalMs = readNumber(outputObj, [
+            "finalResponse",
+            "finalizationDiagnostics",
+            "elapsedMs",
+          ]);
           break;
         default:
           break;
@@ -1173,6 +1342,109 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
     return Array.from(rows.values()).sort((a, b) => a.iteration - b.iteration);
   }, [result]);
+
+  const latencyMetricRows = React.useMemo(
+    () =>
+      [
+        { kind: "section", label: "Planning" },
+        { kind: "metric", label: "Total", key: "planningTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "section", label: "Routing" },
+        { kind: "metric", label: "Total", key: "routingTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "section", label: "Retrieval" },
+        { kind: "metric", label: "Total", key: "retrievalTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "section", label: "Query Generation" },
+        { kind: "metric", label: "Total", key: "queryGenerationTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "section", label: "Search" },
+        { kind: "metric", label: "Total", key: "searchTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "metric", label: "Query fanout", key: "searchQueryFanoutMs", indent: 1, unit: "ms", isTotal: false },
+        {
+          kind: "metric",
+          label: "Profile enrichment",
+          key: "searchProfileEnrichmentMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        {
+          kind: "metric",
+          label: "Persistence update",
+          key: "searchPersistenceUpdateMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        {
+          kind: "metric",
+          label: "Provider call time",
+          key: "searchProviderCallTimeMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        { kind: "section", label: "Extraction" },
+        { kind: "metric", label: "Total", key: "extractionTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "metric", label: "Batch count", key: "extractionBatchCount", indent: 1, unit: "count", isTotal: false },
+        { kind: "metric", label: "Batch p50", key: "extractionP50BatchMs", indent: 1, unit: "ms", isTotal: false },
+        { kind: "metric", label: "Batch p90", key: "extractionP90BatchMs", indent: 1, unit: "ms", isTotal: false },
+        {
+          kind: "metric",
+          label: "LLM batch count",
+          key: "extractionLlmBatchCount",
+          indent: 1,
+          unit: "count",
+          isTotal: false,
+        },
+        {
+          kind: "metric",
+          label: "Fallback batch count",
+          key: "extractionFallbackBatchCount",
+          indent: 1,
+          unit: "count",
+          isTotal: false,
+        },
+        { kind: "section", label: "Combine" },
+        { kind: "metric", label: "Total", key: "combineTotalMs", indent: 0, unit: "ms", isTotal: true },
+        {
+          kind: "metric",
+          label: "Retrieval component",
+          key: "combineRetrievalComponentMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        {
+          kind: "metric",
+          label: "Search component",
+          key: "combineSearchComponentMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        {
+          kind: "metric",
+          label: "Merge compute",
+          key: "combineMergeComputeMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        { kind: "section", label: "Scoring" },
+        { kind: "metric", label: "Total", key: "scoringTotalMs", indent: 0, unit: "ms", isTotal: true },
+        { kind: "metric", label: "Ranking", key: "scoringRankingMs", indent: 1, unit: "ms", isTotal: false },
+        { kind: "metric", label: "Aggregation", key: "scoringAggregationMs", indent: 1, unit: "ms", isTotal: false },
+        {
+          kind: "metric",
+          label: "Finalize decision",
+          key: "scoringFinalizeDecisionMs",
+          indent: 1,
+          unit: "ms",
+          isTotal: false,
+        },
+        { kind: "section", label: "Final Response" },
+        { kind: "metric", label: "Total", key: "finalResponseTotalMs", indent: 0, unit: "ms", isTotal: true },
+      ] as const,
+    [],
+  );
 
   const extractionBatchRows = React.useMemo(() => {
     const extractionSnapshot = result?.snapshots?.extractionResults as
@@ -1248,8 +1520,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               roleMatchScore?: number;
               locationMatchScore?: number;
               authorStrengthScore?: number;
+              hiringIntentScore?: number;
               engagementScore?: number;
               employmentTypeScore?: number;
+              baseScore?: number;
+              intentBoost?: number;
+              finalScore100?: number;
+              gatedToZero?: boolean;
+              gateReason?: string | null;
             };
           }>;
         }
@@ -1262,8 +1540,17 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         roleMatchScore: number;
         locationMatchScore: number;
         authorStrengthScore: number;
-        engagementScore: number;
+        hiringIntentScore: number;
         employmentTypeScore: number;
+        baseScore: number | null;
+        intentBoost: number | null;
+        finalScore100: number | null;
+        gatedToZero: boolean;
+        gateReason:
+          | "hiring_intent_zero"
+          | "employment_type_mismatch"
+          | "hard_location_mismatch"
+          | null;
         rawLocationText: string | null;
         parsedLocations: Array<{
           raw: string;
@@ -1282,8 +1569,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         roleMatchScore: lead.scoreBreakdown.roleMatchScore ?? 0,
         locationMatchScore: lead.scoreBreakdown.locationMatchScore ?? 0,
         authorStrengthScore: lead.scoreBreakdown.authorStrengthScore ?? 0.5,
-        engagementScore: lead.scoreBreakdown.engagementScore ?? 0,
+        hiringIntentScore:
+          lead.scoreBreakdown.hiringIntentScore ?? lead.scoreBreakdown.engagementScore ?? 0.5,
         employmentTypeScore: lead.scoreBreakdown.employmentTypeScore ?? 1,
+        baseScore:
+          typeof lead.scoreBreakdown.baseScore === "number" ? lead.scoreBreakdown.baseScore : null,
+        intentBoost:
+          typeof lead.scoreBreakdown.intentBoost === "number"
+            ? lead.scoreBreakdown.intentBoost
+            : null,
+        finalScore100:
+          typeof lead.scoreBreakdown.finalScore100 === "number"
+            ? lead.scoreBreakdown.finalScore100
+            : null,
+        gatedToZero: lead.scoreBreakdown.gatedToZero === true,
+        gateReason: normalizeScoreGateReason(lead.scoreBreakdown.gateReason),
         rawLocationText: typeof lead.rawLocationText === "string" ? lead.rawLocationText : null,
         parsedLocations: Array.isArray(lead.locations)
           ? lead.locations
@@ -1554,6 +1854,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               roleMatchScore?: number;
               locationMatchScore?: number;
               authorStrengthScore?: number;
+              hiringIntentScore?: number;
+              engagementScore?: number;
+              employmentTypeScore?: number;
+              baseScore?: number;
+              intentBoost?: number;
+              finalScore100?: number;
+              gatedToZero?: boolean;
+              gateReason?: string | null;
             };
             sourceMetadataJson?: Record<string, unknown> | null;
           }>;
@@ -1592,6 +1900,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           roleMatchScore?: number;
           locationMatchScore?: number;
           authorStrengthScore?: number;
+          hiringIntentScore?: number;
+          engagementScore?: number;
+          employmentTypeScore?: number;
+          baseScore?: number;
+          intentBoost?: number;
+          finalScore100?: number;
+          gatedToZero?: boolean;
+          gateReason?: string | null;
         } | null;
         sourceMetadataJson?: Record<string, unknown> | null;
         rankedFullText?: string | null;
@@ -1686,10 +2002,46 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           : typeof scoredLead?.authorStrengthScore === "number"
             ? scoredLead.authorStrengthScore
             : null;
-      const engagementScore =
-        typeof scoredLead?.engagementScore === "number" ? scoredLead.engagementScore : null;
+      const hiringIntentScore =
+        typeof options?.rankedBreakdown?.hiringIntentScore === "number"
+          ? options.rankedBreakdown.hiringIntentScore
+          : typeof options?.rankedBreakdown?.engagementScore === "number"
+            ? options.rankedBreakdown.engagementScore
+            : typeof scoredLead?.hiringIntentScore === "number"
+              ? scoredLead.hiringIntentScore
+              : null;
       const employmentTypeScore =
-        typeof scoredLead?.employmentTypeScore === "number" ? scoredLead.employmentTypeScore : null;
+        typeof options?.rankedBreakdown?.employmentTypeScore === "number"
+          ? options.rankedBreakdown.employmentTypeScore
+          : typeof scoredLead?.employmentTypeScore === "number"
+            ? scoredLead.employmentTypeScore
+            : null;
+      const baseScore =
+        typeof options?.rankedBreakdown?.baseScore === "number"
+          ? options.rankedBreakdown.baseScore
+          : typeof scoredLead?.baseScore === "number"
+            ? scoredLead.baseScore
+            : null;
+      const intentBoost =
+        typeof options?.rankedBreakdown?.intentBoost === "number"
+          ? options.rankedBreakdown.intentBoost
+          : typeof scoredLead?.intentBoost === "number"
+            ? scoredLead.intentBoost
+            : null;
+      const finalScore100 =
+        typeof options?.rankedBreakdown?.finalScore100 === "number"
+          ? options.rankedBreakdown.finalScore100
+          : typeof scoredLead?.finalScore100 === "number"
+            ? scoredLead.finalScore100
+            : typeof score === "number" && Number.isFinite(score)
+              ? Math.round(Math.max(0, Math.min(1, score)) * 100)
+              : null;
+      const gateReason =
+        normalizeScoreGateReason(options?.rankedBreakdown?.gateReason) ??
+        normalizeScoreGateReason(scoredLead?.gateReason);
+      const gatedToZero =
+        options?.rankedBreakdown?.gatedToZero === true ||
+        scoredLead?.gatedToZero === true;
       const fullText =
         (typeof options?.rankedFullText === "string" && options.rankedFullText.trim()
           ? options.rankedFullText
@@ -1706,7 +2058,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         fullText,
         snippet: typeof lead.snippet === "string" ? lead.snippet : null,
       });
-      const isNew = lead.isNewForUser === true || lead.newBadge === "new";
+      const mergeKey = resolveLeadMergeKey(lead);
+      const isNew = runStartedWithExistingFeed
+        ? Boolean(mergeKey && runNewLeadKeys[mergeKey])
+        : lead.isNewForUser === true || lead.newBadge === "new";
       const whyMatched = extractWhyMatchedFromMetadata(sourceMetadata);
       const displayPostAuthor = postContext?.primaryAuthorName ?? lead.postAuthor ?? null;
       const displayPostAuthorUrl =
@@ -1799,8 +2154,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         roleMatchScore,
         locationMatchScore,
         authorStrengthScore,
-        engagementScore,
+        hiringIntentScore,
         employmentTypeScore,
+        baseScore,
+        intentBoost,
+        finalScore100,
+        gatedToZero,
+        gateReason,
         isNew,
         fullText,
         whyMatched,
@@ -1943,7 +2303,14 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     });
 
     return dedupedRows.deduped;
-  }, [postFeedLeads, rankedScoredLeads, resolveAuthorProfileForLead, resolveScoredLeadForRow]);
+  }, [
+    postFeedLeads,
+    rankedScoredLeads,
+    resolveAuthorProfileForLead,
+    resolveScoredLeadForRow,
+    runStartedWithExistingFeed,
+    runNewLeadKeys,
+  ]);
   const postFeedRowsByKey = React.useMemo(
     () => new Map(postFeedRows.map((row) => [row.key, row])),
     [postFeedRows],
@@ -2310,20 +2677,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     };
   }, [result]);
 
+  const graphSequence = React.useMemo(
+    () => (isRunning ? liveSequence : (result?.sequence ?? [])),
+    [isRunning, liveSequence, result],
+  );
+
   const startedSequence = React.useMemo(
-    () =>
-      (result?.sequence ?? []).filter(
-        (item) => item.phase === "started" && STAGES.includes(item.node),
-      ),
-    [result],
+    () => graphSequence.filter((item) => item.phase === "started" && STAGES.includes(item.node)),
+    [graphSequence],
   );
 
   const iterationPasses = React.useMemo(
     () =>
-      (result?.sequence ?? []).filter(
-        (item) => item.phase === "started" && item.node === "combined_result",
-      ).length,
-    [result],
+      graphSequence.filter((item) => item.phase === "started" && item.node === "combined_result")
+        .length,
+    [graphSequence],
   );
 
   const playbackNodes = React.useMemo(
@@ -2388,26 +2756,19 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   }, [liveLogEntries, selectedLogIteration]);
   const latencyTotalsByIteration = React.useMemo(() => {
     const totals = new Map<number, number>();
+    const totalKeys = latencyMetricRows
+      .filter((metric) => metric.kind === "metric" && metric.isTotal && metric.unit === "ms")
+      .map((metric) => metric.key);
     for (const row of iterationTimingRows) {
-      const values = [
-        row.planningPhaseMs,
-        row.executionRoutingMs,
-        row.retrievalArmMs,
-        row.queryGenerationMs,
-        row.searchMs,
-        row.extractionMs,
-        row.combinedResultMs,
-        row.scoringMs,
-        row.finalResponseMs,
-      ];
       let iterationTotal = 0;
-      for (const value of values) {
+      for (const key of totalKeys) {
+        const value = row[key];
         if (typeof value === "number") iterationTotal += value;
       }
       totals.set(row.iteration, iterationTotal);
     }
     return totals;
-  }, [iterationTimingRows]);
+  }, [iterationTimingRows, latencyMetricRows]);
 
   React.useEffect(() => {
     if (!selectedLogNode) return;
@@ -2505,9 +2866,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   const completedNodes = React.useMemo(() => {
     const nodes = new Set<string>();
     if (isRunning) {
-      for (const item of (result?.sequence ?? []).filter(
-        (s) => s.phase === "started" && STAGES.includes(s.node),
-      )) {
+      for (const item of startedSequence) {
         nodes.add(item.node);
       }
       return nodes;
@@ -2521,7 +2880,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       if (node) nodes.add(node);
     }
     return nodes;
-  }, [result, currentStep, isRunning, isPostRunNeutralGraph, startedSequence]);
+  }, [currentStep, isRunning, isPostRunNeutralGraph, startedSequence]);
 
   const traversedEdges = React.useMemo(() => {
     const edges = new Set<string>();
@@ -2577,6 +2936,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     runStartedWithExistingFeedRef.current = isSameContextRerun;
     runAccumulatedAddedCountRef.current = 0;
     setRunStartedWithExistingFeed(isSameContextRerun);
+    setRunNewLeadKeys({});
     setLastRunNewLeadCount(null);
     setActiveSearchKey(nextSearchKey);
     if (normalizedSticky.droppedCount > 0) {
@@ -2591,6 +2951,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     setRunErrorSummary(null);
     setNodewiseExplanation(null);
     setLiveLogEntries([]);
+    setLiveSequence([]);
     setLiveExtractionRows([]);
     setLiveApiCalls([]);
     setExpandedScoreRows({});
@@ -2673,12 +3034,16 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               }
             | {
                 type: "interim_results";
-                phase: "retrieval_scored";
+                phase: "retrieval_scored" | "fresh_search_preview";
                 payload: InterimFinalResponse;
               }
             | { type: "final"; payload: DebugRunOutput }
             | { type: "error"; message: string; code?: string };
           if (evt.type === "started") {
+            setLiveSequence((prev) => [
+              ...prev,
+              { step: evt.step, node: evt.node, phase: "started", log: evt.log },
+            ]);
             setActiveStage(evt.node);
             setCurrentStep(Math.max(0, evt.step - 1));
             const timestamp = new Date().toLocaleTimeString();
@@ -2689,6 +3054,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               { timestamp, node: evt.node, iteration, message: evt.log },
             ]);
           } else if (evt.type === "completed") {
+            setLiveSequence((prev) => [
+              ...prev,
+              { step: evt.step, node: evt.node, phase: "completed", log: evt.log },
+            ]);
             const timestamp = new Date().toLocaleTimeString();
             const iterationMatch = evt.log.match(/\[iteration=(\d+)\]/);
             const iteration = iterationMatch ? Number(iterationMatch[1]) : 0;
@@ -2768,13 +3137,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               : [];
             if (incomingLeads.length > 0) {
               setStickyFeedLeads((prev) => {
-                const { merged, addedCount } = mergeNetNewLeads(prev, incomingLeads);
+                const { merged, addedCount, addedKeys } = mergeNetNewLeads(prev, incomingLeads);
                 runAccumulatedAddedCountRef.current += addedCount;
+                if (addedKeys.length > 0) {
+                  setRunNewLeadKeys((existingKeys) => {
+                    const nextKeys = { ...existingKeys };
+                    for (const key of addedKeys) nextKeys[key] = true;
+                    return nextKeys;
+                  });
+                }
                 return merged;
               });
             }
             setInterimFinalResponse(evt.payload);
           } else if (evt.type === "final") {
+            setLiveSequence(evt.payload.sequence ?? []);
             const finalResponseSnapshot = evt.payload?.snapshots?.finalResponse as
               | { leads?: FinalLeadCard[] }
               | null
@@ -2784,8 +3161,15 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               : [];
             if (incomingLeads.length > 0) {
               setStickyFeedLeads((prev) => {
-                const { merged, addedCount } = mergeNetNewLeads(prev, incomingLeads);
+                const { merged, addedCount, addedKeys } = mergeNetNewLeads(prev, incomingLeads);
                 runAccumulatedAddedCountRef.current += addedCount;
+                if (addedKeys.length > 0) {
+                  setRunNewLeadKeys((existingKeys) => {
+                    const nextKeys = { ...existingKeys };
+                    for (const key of addedKeys) nextKeys[key] = true;
+                    return nextKeys;
+                  });
+                }
                 return merged;
               });
             }
@@ -3542,8 +3926,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         roleMatchScore={row.roleMatchScore}
                         locationMatchScore={row.locationMatchScore}
                         authorStrengthScore={row.authorStrengthScore}
-                        engagementScore={row.engagementScore}
+                        hiringIntentScore={row.hiringIntentScore}
                         employmentTypeScore={row.employmentTypeScore}
+                        baseScore={row.baseScore}
+                        intentBoost={row.intentBoost}
+                        finalScore100={row.finalScore100}
+                        gatedToZero={row.gatedToZero}
+                        gateReason={row.gateReason}
                         sourceBadge={row.sourceSignal}
                         isNew={row.isNew}
                         postUrl={row.viewPostUrl}
@@ -4015,44 +4404,70 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         >
                           Iteration {row.iteration + 1}
                           <div className="text-[10px] text-muted-foreground/90">
-                            Σ {latencyTotalsByIteration.get(row.iteration) ?? "-"}
+                            Σ{" "}
+                            {typeof latencyTotalsByIteration.get(row.iteration) === "number"
+                              ? `${Math.round(latencyTotalsByIteration.get(row.iteration) ?? 0)} ms`
+                              : "-"}
                           </div>
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {(
-                      [
-                        ["planning", "planningPhaseMs"],
-                        ["routing", "executionRoutingMs"],
-                        ["retrieval", "retrievalArmMs"],
-                        ["query_generation", "queryGenerationMs"],
-                        ["search", "searchMs"],
-                        ["extraction", "extractionMs"],
-                        ["combined", "combinedResultMs"],
-                        ["scoring", "scoringMs"],
-                        ["final_response", "finalResponseMs"],
-                      ] as const
-                    ).map(([label, key]) => (
-                      <tr key={`metric-${label}`} className="border-t border-border/50">
-                        <td className="w-[1%] whitespace-nowrap px-3 py-2 font-medium">{label}</td>
-                        {iterationTimingRows.length === 0 ? (
-                          <td className="w-[96px] whitespace-nowrap px-3 py-2 text-muted-foreground">
-                            -
-                          </td>
-                        ) : (
-                          iterationTimingRows.map((row) => (
-                            <td
-                              key={`metric-${label}-${row.iteration}`}
-                              className="w-[96px] whitespace-nowrap px-3 py-2"
-                            >
-                              {row[key] ?? "-"}
+                    {latencyMetricRows.map((metric, metricIndex) => {
+                      if (metric.kind === "section") {
+                        return (
+                          <tr key={`latency-section-${metric.label}-${metricIndex}`} className="border-t border-border/70 bg-muted/30">
+                            <td className="w-[1%] whitespace-nowrap px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                              {metric.label}
                             </td>
-                          ))
-                        )}
-                      </tr>
-                    ))}
+                            {iterationTimingRows.length === 0 ? (
+                              <td className="w-[96px] whitespace-nowrap px-3 py-2 text-muted-foreground">-</td>
+                            ) : (
+                              iterationTimingRows.map((row) => (
+                                <td
+                                  key={`latency-section-${metric.label}-${row.iteration}`}
+                                  className="w-[96px] whitespace-nowrap px-3 py-2 text-muted-foreground"
+                                >
+                                  -
+                                </td>
+                              ))
+                            )}
+                          </tr>
+                        );
+                      }
+
+                      return (
+                        <tr key={`metric-${metric.key}-${metricIndex}`} className="border-t border-border/50">
+                          <td className={`w-[1%] whitespace-nowrap px-3 py-2 ${metric.indent === 0 ? "font-medium" : "text-muted-foreground"}`}>
+                            {metric.indent === 0 ? metric.label : `\u21B3 ${metric.label}`}
+                          </td>
+                          {iterationTimingRows.length === 0 ? (
+                            <td className="w-[96px] whitespace-nowrap px-3 py-2 text-muted-foreground">
+                              -
+                            </td>
+                          ) : (
+                            iterationTimingRows.map((row) => {
+                              const value = row[metric.key];
+                              const text =
+                                typeof value !== "number"
+                                  ? "-"
+                                  : metric.unit === "ms"
+                                    ? `${Math.round(value)} ms`
+                                    : String(Math.round(value));
+                              return (
+                                <td
+                                  key={`metric-${metric.key}-${row.iteration}`}
+                                  className="w-[96px] whitespace-nowrap px-3 py-2"
+                                >
+                                  {text}
+                                </td>
+                              );
+                            })
+                          )}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -4066,7 +4481,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                     {[
                       ["taskComplete", result ? String(result.final.taskComplete) : "-"],
                       ["stopReason", result ? (result.final.stopReason ?? "null") : "-"],
-                      ["plannerMode", result ? (result.final.plannerMode ?? "null") : "-"],
+                      [
+                        "plannerMode",
+                        result ? formatPlannerModeLabel(result.final.plannerMode ?? null) : "-",
+                      ],
                       [
                         "iterationsUsed",
                         result ? String(iterationPasses || result.final.iteration + 1) : "-",
@@ -4133,7 +4551,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                           ? "n/a"
                           : String(plannerDecisionSnapshot.targetHighQualityLeads),
                       ],
-                      ["plannerMode", String(plannerDecisionSnapshot.plannerMode)],
+                      ["plannerMode", plannerDecisionSnapshot.plannerModeLabel],
                       [
                         "enableRetrieval",
                         plannerDecisionSnapshot.enableRetrieval == null
@@ -4336,11 +4754,35 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                       authorStrengthScore:{" "}
                                       {breakdown.authorStrengthScore.toFixed(3)}
                                     </p>
-                                    <p>engagementScore: {breakdown.engagementScore.toFixed(3)}</p>
+                                    <p>
+                                      hiringIntentScore: {breakdown.hiringIntentScore.toFixed(3)}
+                                    </p>
+                                    <p>
+                                      intentBoost:{" "}
+                                      {typeof breakdown.intentBoost === "number"
+                                        ? breakdown.intentBoost
+                                        : "-"}
+                                    </p>
                                     <p>
                                       employmentTypeScore:{" "}
                                       {breakdown.employmentTypeScore.toFixed(3)}
                                     </p>
+                                    <p>
+                                      baseScore:{" "}
+                                      {typeof breakdown.baseScore === "number"
+                                        ? breakdown.baseScore.toFixed(3)
+                                        : "-"}
+                                    </p>
+                                    <p>
+                                      finalScore100:{" "}
+                                      {typeof breakdown.finalScore100 === "number"
+                                        ? breakdown.finalScore100.toFixed(0)
+                                        : "-"}
+                                    </p>
+                                    <p>
+                                      gatedToZero: {breakdown.gatedToZero ? "true" : "false"}
+                                    </p>
+                                    <p>gateReason: {breakdown.gateReason ?? "none"}</p>
                                     <p>
                                       final leadScore:{" "}
                                       {lead.score != null ? lead.score.toFixed(3) : "unscored"}
@@ -4600,11 +5042,35 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                       authorStrengthScore:{" "}
                                       {scoredLead.authorStrengthScore.toFixed(3)}
                                     </p>
-                                    <p>engagementScore: {scoredLead.engagementScore.toFixed(3)}</p>
+                                    <p>
+                                      hiringIntentScore: {scoredLead.hiringIntentScore.toFixed(3)}
+                                    </p>
+                                    <p>
+                                      intentBoost:{" "}
+                                      {typeof scoredLead.intentBoost === "number"
+                                        ? scoredLead.intentBoost
+                                        : "-"}
+                                    </p>
                                     <p>
                                       employmentTypeScore:{" "}
                                       {scoredLead.employmentTypeScore.toFixed(3)}
                                     </p>
+                                    <p>
+                                      baseScore:{" "}
+                                      {typeof scoredLead.baseScore === "number"
+                                        ? scoredLead.baseScore.toFixed(3)
+                                        : "-"}
+                                    </p>
+                                    <p>
+                                      finalScore100:{" "}
+                                      {typeof scoredLead.finalScore100 === "number"
+                                        ? scoredLead.finalScore100.toFixed(0)
+                                        : "-"}
+                                    </p>
+                                    <p>
+                                      gatedToZero: {scoredLead.gatedToZero ? "true" : "false"}
+                                    </p>
+                                    <p>gateReason: {scoredLead.gateReason ?? "none"}</p>
                                     <p>
                                       rawLocationText:{" "}
                                       {scoredLead.rawLocationText ?? "Location not specified"}

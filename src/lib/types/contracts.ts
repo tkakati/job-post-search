@@ -60,6 +60,9 @@ export type PlannerOutput = {
     totalRetrievedCandidates: number;
     signalSource: string;
   };
+  planningDiagnostics?: {
+    elapsedMs: number;
+  };
 };
 
 export type RetrievalOutput = {
@@ -127,6 +130,9 @@ export type SearchOutput = {
     resultsFetched: number;
     resultsKept: number;
     dedupedCount: number;
+    queryFanoutMs?: number;
+    profileEnrichmentMs?: number;
+    persistenceUpdateMs?: number;
   };
   // Keep `leads` for backward compatibility with downstream merge logic.
   leads: LeadRecord[];
@@ -230,8 +236,18 @@ export type ScoredLead = LeadRecord & {
     roleMatchScore: number;
     locationMatchScore: number;
     authorStrengthScore: number;
-    engagementScore: number;
+    hiringIntentScore?: number;
+    engagementScore?: number;
     employmentTypeScore: number;
+    baseScore?: number;
+    intentBoost?: number;
+    finalScore100?: number;
+    gatedToZero?: boolean;
+    gateReason?:
+      | "hiring_intent_zero"
+      | "employment_type_mismatch"
+      | "hard_location_mismatch"
+      | null;
   };
 };
 
@@ -305,7 +321,7 @@ export type LeadCardViewModel = {
   provenanceSources: Array<"retrieval" | "fresh_search">;
   postedAt?: string | null;
   isNewForUser: boolean;
-  newBadge: "new";
+  newBadge?: "new";
   qualityBadge?: "high" | "medium" | "low" | "unscored";
 };
 

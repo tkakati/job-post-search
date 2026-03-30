@@ -12,7 +12,6 @@ import { dbClient } from "@/lib/db";
 import { resolveLinkedinPostContext } from "@/lib/linkedin/repost-context";
 import {
   generatedQueries as generatedQueriesTable,
-  leadSources,
   leads,
   queryPerformance,
 } from "@/lib/db/schema";
@@ -23,8 +22,6 @@ import { env } from "@/lib/env";
 import { emitDebugApiCall, redactApifyUrl } from "@/lib/debug/api-call-sink";
 
 const LINKEDIN_PROFILE_SCRAPER_ACTOR = "harvestapi/linkedin-profile-scraper";
-const PROFILE_ENRICH_CONCURRENCY = 5;
-const PROFILE_ENRICH_RETRY_CONCURRENCY = 1;
 const PROFILE_SCRAPER_MODE = "Profile details + email search ($10 per 1k)";
 type AuthorProfileRecord = Record<string, string | null>;
 
@@ -407,67 +404,21 @@ async function fetchLinkedinProfilesBatch(profileUrls: string[]) {
     },
   });
 
-  for (
-    let i = 0;
-    i < missingUrls.length;
-    i += PROFILE_ENRICH_RETRY_CONCURRENCY
-  ) {
-    const chunk = missingUrls.slice(i, i + PROFILE_ENRICH_RETRY_CONCURRENCY);
-    const retryResults = await Promise.all(
-      chunk.map(async (profileUrl) => {
-        const singleEndpoint = buildProfileScraperEndpoint(env.APIFY_API_TOKEN!, 1);
+  const retryResults = await Promise.all(
+    missingUrls.map(async (profileUrl) => {
+      const singleEndpoint = buildProfileScraperEndpoint(env.APIFY_API_TOKEN!, 1);
 
-        try {
-          const singleRes = await fetch(singleEndpoint, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              profileScraperMode: PROFILE_SCRAPER_MODE,
-              queries: [profileUrl],
-            }),
-          });
-          if (!singleRes.ok) {
-            const errBody = await singleRes.text().catch(() => "");
-            emitDebugApiCall({
-              node: "search",
-              api: "Apify linkedin-profile-scraper (single retry)",
-              method: "POST",
-              url: redactApifyUrl(singleEndpoint),
-              input: {
-                actor: LINKEDIN_PROFILE_SCRAPER_ACTOR,
-                query: profileUrl,
-                maxTotalChargeUsd: maxTotalChargeUsd ?? "unset",
-              },
-              output: {
-                status: singleRes.status,
-                errorPreview: errBody.slice(0, 800),
-              },
-            });
-            return [profileUrl, null] as const;
-          }
-
-          const singleJson = (await singleRes.json()) as unknown;
-          const singleItems = Array.isArray(singleJson) ? singleJson : [];
-          let resolvedProfile: AuthorProfileRecord | null = null;
-          for (const entry of singleItems) {
-            if (!entry || typeof entry !== "object") continue;
-            const row = entry as Record<string, unknown>;
-            const matchedUrlRaw =
-              readString(row.query) ??
-              readString(row.profileUrl) ??
-              readString(row.linkedinUrl) ??
-              readString(row.url);
-            if (!matchedUrlRaw) continue;
-            const matchedNormalized = normalizeLinkedinProfileUrl(matchedUrlRaw);
-            const resolvedRequestedUrl = resolveRequestedProfileUrl(
-              [profileUrl],
-              matchedNormalized,
-            );
-            if (!resolvedRequestedUrl) continue;
-            resolvedProfile = toAuthorProfileRecord(row);
-            break;
-          }
-
+      try {
+        const singleRes = await fetch(singleEndpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            profileScraperMode: PROFILE_SCRAPER_MODE,
+            queries: [profileUrl],
+          }),
+        });
+        if (!singleRes.ok) {
+          const errBody = await singleRes.text().catch(() => "");
           emitDebugApiCall({
             node: "search",
             api: "Apify linkedin-profile-scraper (single retry)",
@@ -480,34 +431,73 @@ async function fetchLinkedinProfilesBatch(profileUrls: string[]) {
             },
             output: {
               status: singleRes.status,
-              itemCount: singleItems.length,
-              resolved: resolvedProfile != null,
-            },
-          });
-
-          return [profileUrl, resolvedProfile] as const;
-        } catch (error) {
-          emitDebugApiCall({
-            node: "search",
-            api: "Apify linkedin-profile-scraper (single retry)",
-            method: "POST",
-            input: {
-              actor: LINKEDIN_PROFILE_SCRAPER_ACTOR,
-              query: profileUrl,
-              maxTotalChargeUsd: maxTotalChargeUsd ?? "unset",
-            },
-            output: {
-              error:
-                error instanceof Error ? error.message : "single_retry_unknown_error",
+              errorPreview: errBody.slice(0, 800),
             },
           });
           return [profileUrl, null] as const;
         }
-      }),
-    );
-    for (const [profileUrl, profile] of retryResults) {
-      if (profile) result.set(profileUrl, profile);
-    }
+
+        const singleJson = (await singleRes.json()) as unknown;
+        const singleItems = Array.isArray(singleJson) ? singleJson : [];
+        let resolvedProfile: AuthorProfileRecord | null = null;
+        for (const entry of singleItems) {
+          if (!entry || typeof entry !== "object") continue;
+          const row = entry as Record<string, unknown>;
+          const matchedUrlRaw =
+            readString(row.query) ??
+            readString(row.profileUrl) ??
+            readString(row.linkedinUrl) ??
+            readString(row.url);
+          if (!matchedUrlRaw) continue;
+          const matchedNormalized = normalizeLinkedinProfileUrl(matchedUrlRaw);
+          const resolvedRequestedUrl = resolveRequestedProfileUrl(
+            [profileUrl],
+            matchedNormalized,
+          );
+          if (!resolvedRequestedUrl) continue;
+          resolvedProfile = toAuthorProfileRecord(row);
+          break;
+        }
+
+        emitDebugApiCall({
+          node: "search",
+          api: "Apify linkedin-profile-scraper (single retry)",
+          method: "POST",
+          url: redactApifyUrl(singleEndpoint),
+          input: {
+            actor: LINKEDIN_PROFILE_SCRAPER_ACTOR,
+            query: profileUrl,
+            maxTotalChargeUsd: maxTotalChargeUsd ?? "unset",
+          },
+          output: {
+            status: singleRes.status,
+            itemCount: singleItems.length,
+            resolved: resolvedProfile != null,
+          },
+        });
+
+        return [profileUrl, resolvedProfile] as const;
+      } catch (error) {
+        emitDebugApiCall({
+          node: "search",
+          api: "Apify linkedin-profile-scraper (single retry)",
+          method: "POST",
+          input: {
+            actor: LINKEDIN_PROFILE_SCRAPER_ACTOR,
+            query: profileUrl,
+            maxTotalChargeUsd: maxTotalChargeUsd ?? "unset",
+          },
+          output: {
+            error:
+              error instanceof Error ? error.message : "single_retry_unknown_error",
+          },
+        });
+        return [profileUrl, null] as const;
+      }
+    }),
+  );
+  for (const [profileUrl, profile] of retryResults) {
+    if (profile) result.set(profileUrl, profile);
   }
 
   missingUrls = profileUrls.filter((url) => result.get(url) == null);
@@ -543,19 +533,14 @@ async function enrichPostsWithAuthorProfiles(
   );
   const uncachedProfileUrls = uniqueProfileUrls.filter((url) => !profileByUrl.has(url));
 
-  for (
-    let i = 0;
-    i < uncachedProfileUrls.length;
-    i += PROFILE_ENRICH_CONCURRENCY
-  ) {
-    const chunk = uncachedProfileUrls.slice(i, i + PROFILE_ENRICH_CONCURRENCY);
+  if (uncachedProfileUrls.length > 0) {
     try {
-      const profilesByUrl = await fetchLinkedinProfilesBatch(chunk);
-      for (const url of chunk) {
+      const profilesByUrl = await fetchLinkedinProfilesBatch(uncachedProfileUrls);
+      for (const url of uncachedProfileUrls) {
         profileByUrl.set(url, profilesByUrl.get(url) ?? null);
       }
     } catch {
-      for (const url of chunk) {
+      for (const url of uncachedProfileUrls) {
         profileByUrl.set(url, null);
       }
     }
@@ -698,8 +683,7 @@ export function summarizeQueryPerformance(input: {
   };
 }
 
-async function persistLeadsAndSources(input: {
-  roleLocationKey: string;
+async function computePotentialNewLeadContributions(input: {
   queryRows: Array<{
     queryText: string;
     queryKind: "explore" | "exploit";
@@ -727,8 +711,6 @@ async function persistLeadsAndSources(input: {
 
   if (deduped.length === 0) {
     return {
-      persistedLeadIds: [],
-      newLeadCount: 0,
       newLeadContributionsByQuery: new Map<string, number>(),
     };
   }
@@ -757,91 +739,6 @@ async function persistLeadsAndSources(input: {
       !existingIdentitySet.has(lead.identityKey),
   );
   const insertedCanonicalUrls = new Set(toInsert.map((lead) => lead.canonicalUrl));
-  if (toInsert.length > 0) {
-    await db.insert(leads).values(
-      toInsert.map((lead) => ({
-        canonicalUrl: lead.canonicalUrl,
-        identityKey: lead.identityKey,
-        sourceType: lead.sourceType,
-        titleOrRole: lead.titleOrRole,
-        company: lead.company ?? null,
-        location: lead.rawLocationText ?? null,
-        normalizedLocationJson:
-          lead.normalizedLocationJson ??
-          {
-            locations: lead.locations ?? [],
-          },
-        employmentType: lead.employmentType ?? null,
-        workMode: lead.workMode ?? null,
-        author: lead.author ?? null,
-        snippet: lead.snippet ?? null,
-        fullText: lead.fullText ?? null,
-        postedAt: lead.postedAt ? new Date(lead.postedAt) : null,
-        fetchedAt: lead.fetchedAt ? new Date(lead.fetchedAt) : new Date(),
-        roleEmbedding: lead.roleEmbedding ?? null,
-        hiringIntentScore: lead.hiringIntentScore ?? null,
-        leadScore: lead.leadScore ?? null,
-        roleLocationKey: lead.roleLocationKey,
-        sourceMetadataJson: lead.sourceMetadataJson ?? null,
-      })),
-    );
-  }
-
-  const allRows = await db
-    .select({
-      id: leads.id,
-      canonicalUrl: leads.canonicalUrl,
-      identityKey: leads.identityKey,
-    })
-    .from(leads)
-    .where(
-      or(
-        inArray(leads.canonicalUrl, canonicalUrls),
-        inArray(leads.identityKey, identityKeys),
-      ),
-    );
-  const idByUrl = new Map(allRows.map((row) => [row.canonicalUrl, row.id]));
-  const rowByIdentity = new Map(allRows.map((row) => [row.identityKey, row]));
-
-  const sourceInsertRows = input.queryRows.flatMap((q) =>
-    q.normalized
-      .map((lead) => {
-        const resolved =
-          idByUrl.has(lead.canonicalUrl)
-            ? {
-                leadId: idByUrl.get(lead.canonicalUrl) as number,
-                canonicalUrl: lead.canonicalUrl,
-              }
-            : rowByIdentity.has(lead.identityKey)
-              ? {
-                  leadId: (rowByIdentity.get(lead.identityKey) as { id: number }).id,
-                  canonicalUrl: (
-                    rowByIdentity.get(lead.identityKey) as {
-                      canonicalUrl: string;
-                    }
-                  ).canonicalUrl,
-                }
-              : null;
-        if (!resolved) return null;
-        return {
-          leadId: resolved.leadId,
-          sourceProvider: "apify-linkedin-content",
-          sourceQuery: q.queryText,
-          sourceUrl: resolved.canonicalUrl,
-          sourceInputUrl: q.sourceUrl,
-          sourceMetadataJson: {
-            queryKind: q.queryKind,
-            isExplore: q.isExplore,
-            roleLocationKey: input.roleLocationKey,
-          },
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null),
-  );
-
-  if (sourceInsertRows.length > 0) {
-    await db.insert(leadSources).values(sourceInsertRows).onConflictDoNothing();
-  }
 
   const newLeadContributionsByQuery = new Map<string, number>();
   for (const q of input.queryRows) {
@@ -856,8 +753,6 @@ async function persistLeadsAndSources(input: {
   }
 
   return {
-    persistedLeadIds: allRows.map((row) => row.id),
-    newLeadCount: toInsert.length,
     newLeadContributionsByQuery,
   };
 }
@@ -961,83 +856,107 @@ export async function runSearchNode(input: {
     datasetId: string | null;
     strictCostMode: boolean;
   }> = [];
-  let totalApifyCallTime = 0;
-  let profileEnrichmentAttempted = 0;
-  let profileEnrichmentSucceeded = 0;
   const profileEnrichmentCacheByUrl = new Map<string, AuthorProfileRecord | null>();
-
-  const CONCURRENCY = 3;
-  const perQueryRuns: Array<{
-    queryText: string;
-    sourceUrl: string;
-    rawItems: Array<Record<string, unknown>>;
-    normalizedItems: ProviderRawResult[];
-    attempts: Array<{
-      payloadKeys: string[];
-      status: number;
-      errorPreview?: string;
-      success: boolean;
-    }>;
-    selectedPayloadKeys: string[];
-    datasetId: string | null;
-    strictCostMode: boolean;
-  }> = [];
-
-  for (let i = 0; i < generated.length; i += CONCURRENCY) {
-    const chunk = generated.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(
-      chunk.map(async (q) => {
-        const apifyStartedAt = Date.now();
-        try {
-          const out = await runApifyLinkedInSearch({
-            queryText: q.queryText,
-            sourceUrl: q.sourceUrl,
-          });
-          totalApifyCallTime += Date.now() - apifyStartedAt;
-          return {
-            queryText: q.queryText,
-            sourceUrl: q.sourceUrl,
-            rawItems: out.rawItems,
-            normalizedItems: out.normalizedItems,
-            attempts: out.attempts,
-            selectedPayloadKeys: out.selectedPayloadKeys,
-            datasetId: out.datasetId,
-            strictCostMode: Boolean(out.strictCostMode),
-          };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "provider_execute_failed";
-          queryErrors.push({ queryText: q.queryText, error: message });
-          return {
-            queryText: q.queryText,
-            sourceUrl: q.sourceUrl,
-            rawItems: [],
-            normalizedItems: [],
-            attempts: [],
-            selectedPayloadKeys: [],
-            datasetId: null,
-            strictCostMode: true,
-          };
-        }
-      }),
-    );
-    perQueryRuns.push(...results);
+  const queryFanoutStartedAt = Date.now();
+  const perQueryRuns = await Promise.all(
+    generated.map(async (q) => {
+      const apifyStartedAt = Date.now();
+      try {
+        const out = await runApifyLinkedInSearch({
+          queryText: q.queryText,
+          sourceUrl: q.sourceUrl,
+        });
+        return {
+          queryText: q.queryText,
+          sourceUrl: q.sourceUrl,
+          rawItems: out.rawItems,
+          normalizedItems: out.normalizedItems,
+          attempts: out.attempts,
+          selectedPayloadKeys: out.selectedPayloadKeys,
+          datasetId: out.datasetId,
+          strictCostMode: Boolean(out.strictCostMode),
+          apifyCallMs: Date.now() - apifyStartedAt,
+          error: null as string | null,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "provider_execute_failed";
+        return {
+          queryText: q.queryText,
+          sourceUrl: q.sourceUrl,
+          rawItems: [] as Array<Record<string, unknown>>,
+          normalizedItems: [] as ProviderRawResult[],
+          attempts: [] as Array<{
+            payloadKeys: string[];
+            status: number;
+            errorPreview?: string;
+            success: boolean;
+          }>,
+          selectedPayloadKeys: [] as string[],
+          datasetId: null as string | null,
+          strictCostMode: true,
+          apifyCallMs: Date.now() - apifyStartedAt,
+          error: message,
+        };
+      }
+    }),
+  );
+  const queryFanoutMs = Date.now() - queryFanoutStartedAt;
+  const totalApifyCallTime = perQueryRuns.reduce(
+    (sum, run) => sum + run.apifyCallMs,
+    0,
+  );
+  for (const run of perQueryRuns) {
+    if (run.error) {
+      queryErrors.push({ queryText: run.queryText, error: run.error });
+    }
   }
 
-  for (const q of generated) {
-    const run = perQueryRuns.find(
-      (x) => x.queryText === q.queryText && x.sourceUrl === q.sourceUrl,
-    );
+  const shouldSkipProfileEnrichmentForFastFirstFresh =
+    state.iteration === 0 && state.searchResults == null;
+  const profileEnrichmentStartedAt = Date.now();
+  const allRawPostsWithRunIndex = perQueryRuns.flatMap((run, runIndex) =>
+    run.rawItems.map((post) => ({ runIndex, post })),
+  );
+  const enrichedGlobalRawItems = shouldSkipProfileEnrichmentForFastFirstFresh
+    ? allRawPostsWithRunIndex.map((entry) => ({
+        ...(entry.post as Record<string, unknown>),
+        authorProfile: null,
+      }))
+    : await enrichPostsWithAuthorProfiles(
+        allRawPostsWithRunIndex.map((entry) => entry.post),
+        profileEnrichmentCacheByUrl,
+      );
+  const profileEnrichmentMs = Date.now() - profileEnrichmentStartedAt;
+  const profileEnrichmentAttempted = shouldSkipProfileEnrichmentForFastFirstFresh
+    ? 0
+    : allRawPostsWithRunIndex.length;
+  const profileEnrichmentSucceeded = shouldSkipProfileEnrichmentForFastFirstFresh
+    ? 0
+    : enrichedGlobalRawItems.filter(
+    (post) => post.authorProfile && typeof post.authorProfile === "object",
+      ).length;
+  const enrichedRawItemsByRunIndex = new Map<
+    number,
+    Array<Record<string, unknown> & { authorProfile: AuthorProfileRecord | null }>
+  >();
+  for (let index = 0; index < allRawPostsWithRunIndex.length; index += 1) {
+    const runIndex = allRawPostsWithRunIndex[index]?.runIndex;
+    const enrichedItem = enrichedGlobalRawItems[index];
+    if (runIndex == null || !enrichedItem) continue;
+    const existing = enrichedRawItemsByRunIndex.get(runIndex);
+    if (existing) {
+      existing.push(enrichedItem);
+      continue;
+    }
+    enrichedRawItemsByRunIndex.set(runIndex, [enrichedItem]);
+  }
+
+  for (let runIndex = 0; runIndex < generated.length; runIndex += 1) {
+    const q = generated[runIndex];
+    if (!q) continue;
+    const run = perQueryRuns[runIndex];
     const apifyRawItems = run?.rawItems ?? [];
-    const enrichedRawItems = await enrichPostsWithAuthorProfiles(
-      apifyRawItems,
-      profileEnrichmentCacheByUrl,
-    );
-    profileEnrichmentAttempted += apifyRawItems.length;
-    profileEnrichmentSucceeded += enrichedRawItems.filter(
-      (post) =>
-        post.authorProfile &&
-        typeof post.authorProfile === "object",
-    ).length;
+    const enrichedRawItems = enrichedRawItemsByRunIndex.get(runIndex) ?? [];
     const rawItems = run?.normalizedItems ?? [];
     const authorProfileByCanonicalUrl = new Map<string, Record<string, unknown>>();
     for (const rawPost of enrichedRawItems) {
@@ -1140,11 +1059,12 @@ export async function runSearchNode(input: {
   const resultsFetched = rawSearchResults.reduce((acc, r) => acc + r.items.length, 0);
   const resultsKept = normalizedAll.length;
   const dedupedCount = 0;
-  const { persistedLeadIds, newLeadContributionsByQuery } =
-    await persistLeadsAndSources({
-      roleLocationKey: state.roleLocationKey,
+  const persistenceStartedAt = Date.now();
+  const { newLeadContributionsByQuery } =
+    await computePotentialNewLeadContributions({
       queryRows,
     });
+  const persistedLeadIds: number[] = [];
 
   const queryPerformanceSummary = queryRows.map((q) =>
     summarizeQueryPerformance({
@@ -1164,6 +1084,7 @@ export async function runSearchNode(input: {
     roleLocationKey: state.roleLocationKey,
     summaries: queryPerformanceSummary,
   });
+  const persistenceUpdateMs = Date.now() - persistenceStartedAt;
 
   const elapsedMs = Date.now() - startedAt;
   return {
@@ -1178,7 +1099,7 @@ export async function runSearchNode(input: {
       totalRawResults: resultsFetched,
       totalNormalizedResults: normalizedAll.length,
       dedupedResults: normalizedAll.length,
-      persistedLeadCount: persistedLeadIds.length,
+      persistedLeadCount: 0,
       elapsedMs,
     },
     searchDiagnostics: {
@@ -1188,11 +1109,14 @@ export async function runSearchNode(input: {
       resultsFetched,
       resultsKept,
       dedupedCount,
+      queryFanoutMs,
+      profileEnrichmentMs,
+      persistenceUpdateMs,
     },
     leads: normalizedAll,
     providerMetadataJson: {
       provider: "apify-linkedin-content",
-      batchedActorRun: true,
+      batchedActorRun: false,
       queriesUsed: queryRows.map((q) => ({ queryText: q.queryText, sourceUrl: q.sourceUrl })),
       queryCount: queryRows.length,
       queryPerformanceUpdatedCount: queryPerformanceSummary.length,
@@ -1204,11 +1128,15 @@ export async function runSearchNode(input: {
         searchLatencyMs: elapsedMs,
         searchCalls: queryRows.length,
         results: resultsKept,
+        queryFanoutMs,
+        profileEnrichmentMs,
+        persistenceUpdateMs,
       },
       queryErrors,
       profileEnrichment: {
         attempted: profileEnrichmentAttempted,
         succeeded: profileEnrichmentSucceeded,
+        skippedForFastFirstFresh: shouldSkipProfileEnrichmentForFastFirstFresh,
       },
       fallbackUsed: noRawResults,
     },

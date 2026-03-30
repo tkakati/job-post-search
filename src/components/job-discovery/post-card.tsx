@@ -35,8 +35,15 @@ export type PostCardProps = {
   roleMatchScore?: number | null;
   locationMatchScore?: number | null;
   authorStrengthScore?: number | null;
+  hiringIntentScore?: number | null;
+  // Backward-compatible alias for pre-migration payloads.
   engagementScore?: number | null;
   employmentTypeScore?: number | null;
+  baseScore?: number | null;
+  intentBoost?: number | null;
+  finalScore100?: number | null;
+  gatedToZero?: boolean;
+  gateReason?: "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null;
   sourceBadge?: "retrieved" | "fresh" | "both" | null;
   isNew?: boolean;
   postUrl?: string | null;
@@ -158,6 +165,28 @@ function toPercentLabel(score: number | null | undefined) {
   return `${Math.round(clamped * 100)}%`;
 }
 
+function toFactorLabel(score: number | null | undefined) {
+  if (typeof score !== "number" || !Number.isFinite(score)) return "n/a";
+  const clamped = Math.max(0, Math.min(1, score));
+  return clamped.toFixed(2);
+}
+
+function toScore100Label(score: number | null | undefined) {
+  if (typeof score !== "number" || !Number.isFinite(score)) return "n/a";
+  return String(Math.round(Math.max(0, Math.min(100, score))));
+}
+
+function gateReasonLabel(
+  gateReason: PostCardProps["gateReason"],
+): string | null {
+  if (gateReason === "hiring_intent_zero") return "Score 0: Hiring intent is 0";
+  if (gateReason === "employment_type_mismatch") return "Score 0: Employment type mismatch";
+  if (gateReason === "hard_location_mismatch") {
+    return "Score 0: Location mismatch under hard filter";
+  }
+  return null;
+}
+
 function toDaysAgoLabel(value: string | null | undefined) {
   if (!value) return "";
   const posted = new Date(value);
@@ -183,8 +212,14 @@ export function PostCard({
   roleMatchScore,
   locationMatchScore,
   authorStrengthScore,
+  hiringIntentScore,
   engagementScore,
   employmentTypeScore,
+  baseScore,
+  intentBoost,
+  finalScore100,
+  gatedToZero = false,
+  gateReason = null,
   sourceBadge,
   isNew,
   postUrl,
@@ -235,11 +270,35 @@ export function PostCard({
     ],
   );
   const hasScoreBreakdownTooltip =
+    (typeof leadScore === "number" && Number.isFinite(leadScore)) ||
     (typeof roleMatchScore === "number" && Number.isFinite(roleMatchScore)) ||
     (typeof locationMatchScore === "number" && Number.isFinite(locationMatchScore)) ||
     (typeof authorStrengthScore === "number" && Number.isFinite(authorStrengthScore)) ||
+    (typeof hiringIntentScore === "number" && Number.isFinite(hiringIntentScore)) ||
     (typeof engagementScore === "number" && Number.isFinite(engagementScore)) ||
-    (typeof employmentTypeScore === "number" && Number.isFinite(employmentTypeScore));
+    (typeof employmentTypeScore === "number" && Number.isFinite(employmentTypeScore)) ||
+    (typeof baseScore === "number" && Number.isFinite(baseScore)) ||
+    (typeof intentBoost === "number" && Number.isFinite(intentBoost)) ||
+    (typeof finalScore100 === "number" && Number.isFinite(finalScore100)) ||
+    gatedToZero ||
+    gateReason !== null;
+  const resolvedHiringIntentScore =
+    typeof hiringIntentScore === "number" && Number.isFinite(hiringIntentScore)
+      ? hiringIntentScore
+      : engagementScore;
+  const resolvedScore100 =
+    typeof finalScore100 === "number" && Number.isFinite(finalScore100)
+      ? finalScore100
+      : typeof leadScore === "number" && Number.isFinite(leadScore)
+        ? Math.round(Math.max(0, Math.min(1, leadScore)) * 100)
+        : null;
+  const resolvedIntentBoost =
+    typeof intentBoost === "number" && Number.isFinite(intentBoost)
+      ? intentBoost
+      : typeof resolvedHiringIntentScore === "number" && Number.isFinite(resolvedHiringIntentScore)
+        ? Math.round(Math.max(0, Math.min(1, resolvedHiringIntentScore)) * 15)
+        : null;
+  const gateSummary = gatedToZero ? gateReasonLabel(gateReason) : null;
   const newTag = display.tags.find((tag) => tag.key === "new");
   const matchTag = display.tags.find((tag) => tag.key === "match_strength");
   const recruiterTag = display.tags.find((tag) => tag.key === "author_type");
@@ -369,29 +428,19 @@ export function PostCard({
                         <Eye className="h-2.5 w-2.5" />
                       </button>
                       <div className="pointer-events-none absolute left-0 top-5 z-20 hidden w-72 rounded-md border border-border/70 bg-white p-2 text-left text-[11px] text-foreground shadow-md group-hover:block group-focus-within:block dark:bg-popover dark:text-popover-foreground">
-                        <p>
-                          <span className="font-semibold">A Role Match:</span>{" "}
-                          {toPercentLabel(roleMatchScore)}
-                        </p>
-                        <p>
-                          <span className="font-semibold">B Location Match:</span>{" "}
-                          {toPercentLabel(locationMatchScore)}
-                        </p>
-                        <p>
-                          <span className="font-semibold">C Poster Strength:</span>{" "}
-                          {toPercentLabel(authorStrengthScore)}
-                        </p>
-                        <p>
-                          <span className="font-semibold">D Hiring Intent:</span>{" "}
-                          {toPercentLabel(engagementScore)}
-                        </p>
-                        <p>
-                          <span className="font-semibold">E Employment Type Match:</span>{" "}
-                          {toPercentLabel(employmentTypeScore)}
-                        </p>
-                        <p className="mt-1 text-[10px] text-muted-foreground">
-                          Formula: Match Score = ((0.4×A + 0.3×B + 0.3×C) × (D×E)) × 100
-                        </p>
+                        {gateSummary ? (
+                          <p>{gateSummary}</p>
+                        ) : (
+                          <p>
+                            Score {toScore100Label(resolvedScore100)} = Role{" "}
+                            {toFactorLabel(roleMatchScore)}× + Loc{" "}
+                            {toFactorLabel(locationMatchScore)} + Poster{" "}
+                            {toFactorLabel(authorStrengthScore)} + Intent +
+                            {typeof resolvedIntentBoost === "number"
+                              ? resolvedIntentBoost
+                              : "n/a"}
+                          </p>
+                        )}
                       </div>
                     </span>
                   ) : null}
