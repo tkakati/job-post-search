@@ -275,6 +275,13 @@ export type ScoringOutput = {
     totalRankedLeads: number;
     topLeadIdentityKeys: string[];
     elapsedMs: number;
+    filteredOutMissingHiringIntentCount?: number;
+    rankingTimeMs?: number;
+    aggregationTimeMs?: number;
+    finalizeDecisionTimeMs?: number;
+    metroAreaApplied?: boolean;
+    metroAreaMatchCount?: number;
+    metroAreaMissCount?: number;
   };
 };
 

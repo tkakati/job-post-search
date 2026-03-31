@@ -11,6 +11,10 @@ import { emitDebugApiCall } from "@/lib/debug/api-call-sink";
 import { dbClient } from "@/lib/db";
 import { generatedQueries as generatedQueriesTable, queryPerformance } from "@/lib/db/schema";
 import { buildLinkedInContentSearchUrl } from "@/lib/utils/recency";
+import {
+  getMetroAreaQueryClauses,
+  resolveMetroAreaInput,
+} from "@/lib/location/metro-areas";
 
 type MemoryItem = {
   queryText: string;
@@ -37,7 +41,47 @@ export function sanitizeQueryString(value: string) {
     .replace(/[“”"']/g, "")
     .replace(/\s{2,}/g, " ")
     .trim()
-    .slice(0, 180);
+    .slice(0, 320);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applyLocationExpansionToQuery(input: {
+  queryText: string;
+  location: string;
+  locationClauses: string[];
+  queryIndex: number;
+}) {
+  const base = sanitizeQueryString(input.queryText);
+  if (input.locationClauses.length === 0) return base;
+
+  const locationClause =
+    input.locationClauses[input.queryIndex % input.locationClauses.length] ??
+    input.locationClauses[0] ??
+    "";
+  if (!locationClause) return base;
+
+  let expanded = base;
+  let replacements = 0;
+  const patterns: RegExp[] = [new RegExp(escapeRegExp(input.location), "ig")];
+
+  if (resolveMetroAreaInput(input.location) === "bay_area") {
+    patterns.push(/\bsan francisco bay area\b/gi, /\bsf bay area\b/gi, /\bbay area\b/gi);
+  }
+
+  for (const pattern of patterns) {
+    expanded = expanded.replace(pattern, () => {
+      replacements += 1;
+      return locationClause;
+    });
+  }
+
+  if (replacements === 0) {
+    expanded = `${expanded} ${locationClause}`.trim();
+  }
+  return sanitizeQueryString(expanded);
 }
 
 function isLocationHardFilter(location: string) {
@@ -318,6 +362,10 @@ export function materializeRequestedQueries(input: {
     plannerMode: input.plannerMode,
   });
   const locationIsHardFilter = isLocationHardFilter(input.location);
+  const locationClauses =
+    locationIsHardFilter && resolveMetroAreaInput(input.location) === "bay_area"
+      ? getMetroAreaQueryClauses(input.location)
+      : [];
   const prior = new Set(input.priorQueries.map((q) => sanitizeQueryString(q).toLowerCase()));
   const candidates = filterNearDuplicateCandidates(dedupeCandidates(input.candidates)).filter(
     (q) => !prior.has(sanitizeQueryString(q.queryText).toLowerCase()),
@@ -346,14 +394,20 @@ export function materializeRequestedQueries(input: {
     queryKind: "explore" | "exploit",
   ) => {
     if (selected.length >= input.requestedQueryCount) return false;
-    const normalized = sanitizeQueryString(queryText).toLowerCase();
+    const expandedQuery = applyLocationExpansionToQuery({
+      queryText,
+      location: input.location,
+      locationClauses,
+      queryIndex: selected.length,
+    });
+    const normalized = expandedQuery.toLowerCase();
     if (!normalized || prior.has(normalized) || selectedNormalized.has(normalized)) return false;
     selectedNormalized.add(normalized);
     selected.push({
-      queryText: sanitizeQueryString(queryText),
+      queryText: expandedQuery,
       queryKind,
       isExplore: queryKind === "explore",
-      sourceUrl: toLinkedInContentSearchUrl(queryText, input.recencyPreference),
+      sourceUrl: toLinkedInContentSearchUrl(expandedQuery, input.recencyPreference),
     });
     return true;
   };

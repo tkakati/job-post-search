@@ -59,6 +59,25 @@ describe("query generation mode compliance", () => {
     expect(q.toLowerCase()).toContain("frontend engineer remote");
   });
 
+  it("expands Bay Area location into OR city clauses", () => {
+    const queries = materializeExactlyThree({
+      candidates: [],
+      numExploreQueries: 3,
+      priorQueries: [],
+      role: "Product Manager",
+      location: "Bay Area",
+      highSignalPatterns: [],
+      recencyPreference: "past-week",
+    });
+
+    expect(queries).toHaveLength(3);
+    expect(queries.every((q) => q.queryText.includes(" OR "))).toBe(true);
+    const combined = queries.map((q) => q.queryText).join(" ");
+    expect(combined).toContain("San Francisco");
+    expect(combined).toContain("Mountain View");
+    expect(combined).toContain("Milpitas");
+  });
+
   it("builds LinkedIn URL with datePosted facet", () => {
     const url = buildLinkedInContentSearchUrl({
       queryText: "hiring frontend engineer remote",

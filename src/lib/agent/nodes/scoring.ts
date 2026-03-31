@@ -11,6 +11,11 @@ import {
   haversineDistance,
   resolveLocation,
 } from "@/lib/location/geo";
+import {
+  BAY_AREA_RADIUS_KM,
+  isResolvedLocationInMetroArea,
+  resolveMetroAreaInput,
+} from "@/lib/location/metro-areas";
 import { resolveExtractedCompany } from "@/lib/post-feed/company-resolution";
 import { dbClient } from "@/lib/db";
 import { leads } from "@/lib/db/schema";
@@ -37,6 +42,9 @@ type LocationScoreDebug = {
   resolvedLeadCount: number;
   usedUnknownFallback: boolean;
   explicitResolvableMismatch: boolean;
+  metroAreaApplied: boolean;
+  metroAreaMatchCount: number;
+  metroAreaMissCount: number;
 };
 
 const ROLE_EMBEDDING_BACKFILL_IN_FLIGHT = new Set<string>();
@@ -145,9 +153,67 @@ function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState): Lo
 
   let bestScore = 0;
   let resolvedLeadCount = 0;
+  let metroAreaMatchCount = 0;
+  let metroAreaMissCount = 0;
   const userHasCoordinates = userResolved?.lat != null && userResolved.lon != null;
   const userLat = userHasCoordinates ? userResolved.lat : null;
   const userLon = userHasCoordinates ? userResolved.lon : null;
+  const metroArea = resolveMetroAreaInput(state.location);
+
+  if (metroArea === "bay_area") {
+    for (const loc of leadLocations) {
+      const resolved = resolveLocation(loc.raw);
+      const lat = resolved?.lat;
+      const lon = resolved?.lon;
+      if (lat == null || lon == null) continue;
+      resolvedLeadCount += 1;
+
+      if (
+        isResolvedLocationInMetroArea(resolved, {
+          area: "bay_area",
+          radiusKm: BAY_AREA_RADIUS_KM,
+        })
+      ) {
+        metroAreaMatchCount += 1;
+        bestScore = Math.max(bestScore, 1.0);
+      } else {
+        metroAreaMissCount += 1;
+        bestScore = Math.max(bestScore, 0.4);
+      }
+    }
+
+    const usedUnknownFallback = resolvedLeadCount === 0;
+    if (usedUnknownFallback) bestScore = 0.5;
+
+    if (lead.workMode === "remote") {
+      bestScore = Math.max(bestScore, 0.7);
+    }
+
+    const explicitResolvableMismatch = resolvedLeadCount > 0 && metroAreaMatchCount === 0;
+    if (state.locationIsHardFilter && explicitResolvableMismatch) {
+      return {
+        score: 0.2,
+        userResolved: userHasCoordinates,
+        resolvedLeadCount,
+        usedUnknownFallback,
+        explicitResolvableMismatch,
+        metroAreaApplied: true,
+        metroAreaMatchCount,
+        metroAreaMissCount,
+      };
+    }
+
+    return {
+      score: bestScore,
+      userResolved: userHasCoordinates,
+      resolvedLeadCount,
+      usedUnknownFallback,
+      explicitResolvableMismatch,
+      metroAreaApplied: true,
+      metroAreaMatchCount,
+      metroAreaMissCount,
+    };
+  }
 
   if (userLat != null && userLon != null) {
     for (const loc of leadLocations) {
@@ -186,6 +252,9 @@ function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState): Lo
       resolvedLeadCount,
       usedUnknownFallback,
       explicitResolvableMismatch,
+      metroAreaApplied: false,
+      metroAreaMatchCount: 0,
+      metroAreaMissCount: 0,
     };
   }
 
@@ -195,6 +264,9 @@ function locationMatchScoreForLead(lead: LeadRecord, state: AgentGraphState): Lo
     resolvedLeadCount,
     usedUnknownFallback,
     explicitResolvableMismatch,
+    metroAreaApplied: false,
+    metroAreaMatchCount: 0,
+    metroAreaMissCount: 0,
   };
 }
 
@@ -383,6 +455,15 @@ export async function scoringNode(state: AgentGraphState) {
   const nextIteration =
     isInitialRetrievalScoring || taskComplete ? state.iteration : state.iteration + 1;
   const finalizeDecisionTimeMs = Date.now() - finalizeDecisionStartedAt;
+  const metroAreaApplied = resolveMetroAreaInput(state.location) != null;
+  const metroAreaMatchCount = rankedLeads.reduce(
+    (acc, lead) => acc + lead.locationScoreDebug.metroAreaMatchCount,
+    0,
+  );
+  const metroAreaMissCount = rankedLeads.reduce(
+    (acc, lead) => acc + lead.locationScoreDebug.metroAreaMissCount,
+    0,
+  );
 
   const scoringResults = ScoringOutputSchema.parse({
     roleLocationKey: state.roleLocationKey,
@@ -401,6 +482,9 @@ export async function scoringNode(state: AgentGraphState) {
       aggregationTimeMs,
       finalizeDecisionTimeMs,
       filteredOutMissingHiringIntentCount,
+      metroAreaApplied,
+      metroAreaMatchCount,
+      metroAreaMissCount,
     },
   });
 
@@ -467,7 +551,7 @@ export async function scoringNode(state: AgentGraphState) {
     iteration: nextIteration,
     debugLog: appendDebug(
       state,
-      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, filtered_out_missing_hiring_intent=${filteredOutMissingHiringIntentCount}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, location_stats={locationResolvedUser:${locationResolvedUserCount}, locationResolvedLead:${locationResolvedLeadCount}, locationUnknownFallbackCount:${locationUnknownFallbackCount}, locationDistanceScoredCount:${locationDistanceScoredCount}, locationAliasHitCount:${locationAliasHitCount}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
+      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, filtered_out_missing_hiring_intent=${filteredOutMissingHiringIntentCount}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, location_stats={locationResolvedUser:${locationResolvedUserCount}, locationResolvedLead:${locationResolvedLeadCount}, locationUnknownFallbackCount:${locationUnknownFallbackCount}, locationDistanceScoredCount:${locationDistanceScoredCount}, locationAliasHitCount:${locationAliasHitCount}, metroAreaApplied:${metroAreaApplied}, metroAreaMatchCount:${metroAreaMatchCount}, metroAreaMissCount:${metroAreaMissCount}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
     ),
   };
 }

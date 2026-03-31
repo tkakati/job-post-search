@@ -4,7 +4,7 @@ import { hasLocationAlias, resolveLocation } from "../../src/lib/location/geo";
 describe("geo resolver", () => {
   it("resolves NYC alias to New York coordinates", () => {
     const resolved = resolveLocation("NYC");
-    expect(resolved?.city).toBe("New York");
+    expect(resolved?.city).toMatch(/New York/i);
     expect(resolved?.country).toBe("United States");
     expect(resolved?.lat).not.toBeNull();
     expect(resolved?.lon).not.toBeNull();
@@ -12,7 +12,7 @@ describe("geo resolver", () => {
 
   it("uses state hints to disambiguate city candidates", () => {
     const resolved = resolveLocation("New York, NY");
-    expect(resolved?.city).toBe("New York");
+    expect(resolved?.city).toMatch(/New York/i);
     expect(resolved?.state).toBe("New York");
   });
 
@@ -25,6 +25,15 @@ describe("geo resolver", () => {
 
   it("detects alias usage", () => {
     expect(hasLocationAlias("NYC")).toBe(true);
+    expect(hasLocationAlias("Bay Area")).toBe(true);
     expect(hasLocationAlias("Seattle")).toBe(false);
+  });
+
+  it("resolves Bay Area alias to San Francisco coordinates", () => {
+    const resolved = resolveLocation("Bay Area");
+    expect(resolved?.city).toBe("San Francisco");
+    expect(resolved?.country).toBe("United States");
+    expect(resolved?.lat).not.toBeNull();
+    expect(resolved?.lon).not.toBeNull();
   });
 });

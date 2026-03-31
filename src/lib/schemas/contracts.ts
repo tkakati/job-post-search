@@ -281,6 +281,9 @@ export const ScoringOutputSchema = z.object({
     rankingTimeMs: z.number().int().nonnegative().optional(),
     aggregationTimeMs: z.number().int().nonnegative().optional(),
     finalizeDecisionTimeMs: z.number().int().nonnegative().optional(),
+    metroAreaApplied: z.boolean().optional(),
+    metroAreaMatchCount: z.number().int().nonnegative().optional(),
+    metroAreaMissCount: z.number().int().nonnegative().optional(),
   }),
 });
 

@@ -32,6 +32,9 @@ const DEFAULT_ALIAS_MAP: Record<string, string> = {
   "new york city": "new york",
   sf: "san francisco",
   sfo: "san francisco",
+  "bay area": "san francisco",
+  "sf bay area": "san francisco",
+  "san francisco bay area": "san francisco",
   la: "los angeles",
   dc: "washington",
   "d c": "washington",
@@ -95,8 +98,22 @@ function normalizeStateToken(value: string | null | undefined): string | null {
 function resolveCityKey(rawCity: string) {
   const normalized = normalizeLocationToken(rawCity);
   if (!normalized) return null;
-  const aliasMap = geonamesIndex.aliases ?? DEFAULT_ALIAS_MAP;
-  return aliasMap[normalized] ?? normalized;
+  const aliasMap = {
+    ...DEFAULT_ALIAS_MAP,
+    ...(geonamesIndex.aliases ?? {}),
+  };
+  const baseKey = aliasMap[normalized] ?? normalized;
+  if (geonamesIndex.byCity?.[baseKey]) return baseKey;
+
+  const fallbackKeys = [
+    `${baseKey} city`,
+    baseKey.replace(/\scity$/, "").trim(),
+  ];
+  for (const key of fallbackKeys) {
+    if (key && geonamesIndex.byCity?.[key]) return key;
+  }
+
+  return baseKey;
 }
 
 export function hasLocationAlias(locationString: string | null | undefined) {
@@ -105,7 +122,10 @@ export function hasLocationAlias(locationString: string | null | undefined) {
   const cityInput = parsed.city ?? locationString.trim().split(",")[0] ?? locationString;
   const normalized = normalizeLocationToken(cityInput);
   if (!normalized) return false;
-  const aliasMap = geonamesIndex.aliases ?? DEFAULT_ALIAS_MAP;
+  const aliasMap = {
+    ...DEFAULT_ALIAS_MAP,
+    ...(geonamesIndex.aliases ?? {}),
+  };
   return Boolean(aliasMap[normalized]);
 }
 

@@ -15,6 +15,7 @@ describe("country eligibility helpers", () => {
 
   it("resolves user country from known city map", () => {
     expect(resolveUserCountry("Seattle")).toBe("united_states");
+    expect(resolveUserCountry("Bay Area")).toBe("united_states");
   });
 
   it("extracts explicit lead country tokens", () => {

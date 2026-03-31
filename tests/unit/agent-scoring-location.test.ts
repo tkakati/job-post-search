@@ -96,6 +96,50 @@ describe("scoring location behavior", () => {
     expect(locationScore).toBeGreaterThanOrEqual(0.9);
   });
 
+  it("treats Bay Area listed city matches as strong", async () => {
+    const state = buildScoringState({
+      userLocation: "Bay Area",
+      lead: baseLead({
+        rawLocationText: "San Jose, CA",
+        locations: [
+          {
+            raw: "San Jose, CA",
+            city: "San Jose",
+            state: "CA",
+            country: "US",
+            lat: null,
+            lon: null,
+          },
+        ],
+      }),
+    });
+
+    const out = await scoringNode(state);
+    expect(out.scoringResults.scoredLeads[0]?.scoreBreakdown.locationMatchScore).toBe(1);
+  });
+
+  it("treats nearby non-listed Bay Area cities within 20km as strong", async () => {
+    const state = buildScoringState({
+      userLocation: "Bay Area",
+      lead: baseLead({
+        rawLocationText: "South San Francisco, CA",
+        locations: [
+          {
+            raw: "South San Francisco, CA",
+            city: "South San Francisco",
+            state: "CA",
+            country: "US",
+            lat: null,
+            lon: null,
+          },
+        ],
+      }),
+    });
+
+    const out = await scoringNode(state);
+    expect(out.scoringResults.scoredLeads[0]?.scoreBreakdown.locationMatchScore).toBe(1);
+  });
+
   it("uses neutral fallback when lead location is unresolved", async () => {
     const state = buildScoringState({
       userLocation: "NYC",
@@ -135,6 +179,29 @@ describe("scoring location behavior", () => {
             city: "Toronto",
             state: "ON",
             country: "Canada",
+            lat: null,
+            lon: null,
+          },
+        ],
+      }),
+    });
+
+    const out = await scoringNode(state);
+    expect(out.scoringResults.scoredLeads[0]?.scoreBreakdown.locationMatchScore).toBe(0.2);
+  });
+
+  it("applies hard-filter penalty for explicit out-of-Bay-Area mismatch", async () => {
+    const state = buildScoringState({
+      userLocation: "Bay Area",
+      hardFilter: true,
+      lead: baseLead({
+        rawLocationText: "Los Angeles, CA",
+        locations: [
+          {
+            raw: "Los Angeles, CA",
+            city: "Los Angeles",
+            state: "CA",
+            country: "US",
             lat: null,
             lon: null,
           },
