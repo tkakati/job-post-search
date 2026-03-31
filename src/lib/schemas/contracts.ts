@@ -240,6 +240,7 @@ export const CombinedResultOutputSchema = z.object({
     totalIterationTimeMs: z.number().int().nonnegative().optional(),
     crossSourceRedundancyDroppedCount: z.number().int().nonnegative().optional(),
     countryMismatchDroppedCount: z.number().int().nonnegative().optional(),
+    hiddenDroppedCount: z.number().int().nonnegative().optional(),
   }),
 });
 
@@ -276,6 +277,7 @@ export const ScoringOutputSchema = z.object({
     totalRankedLeads: z.number().int().nonnegative(),
     topLeadIdentityKeys: z.array(z.string().min(1)),
     elapsedMs: z.number().int().nonnegative(),
+    filteredOutMissingHiringIntentCount: z.number().int().nonnegative().optional(),
     rankingTimeMs: z.number().int().nonnegative().optional(),
     aggregationTimeMs: z.number().int().nonnegative().optional(),
     finalizeDecisionTimeMs: z.number().int().nonnegative().optional(),

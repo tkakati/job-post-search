@@ -100,6 +100,30 @@ export const HistoryResponseSchema = z.object({
   items: z.array(HistoryItemSchema),
 });
 
+export const SavedPostFeedLeadSchema = LeadCardViewModelSchema.extend({
+  identityKey: z.string().nullable().optional(),
+  workMode: z.enum(["onsite", "hybrid", "remote"]).nullable().optional(),
+  employmentType: z
+    .enum(["full-time", "part-time", "contract", "internship"])
+    .nullable()
+    .optional(),
+  sourceMetadataJson: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+export const SavedPostFeedResponseSchema = z.object({
+  items: z.array(
+    z.object({
+      lead: SavedPostFeedLeadSchema,
+      runContext: z.object({
+        role: z.string().min(1),
+        location: z.string().min(1),
+        searchRunId: z.number().int().positive().nullable(),
+        shownAt: z.string().datetime(),
+      }),
+    }),
+  ),
+});
+
 export const DebugRunInputSchema = z.object({
   role: z.string().min(1).max(120),
   location: z.string().min(1).max(120),

@@ -32,6 +32,58 @@ function filterLeadsByCountry(input: {
   return { filtered, countryMismatchDroppedCount };
 }
 
+function normalizeIdentityKey(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeUrlForLookup(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function filterLeadsByHiddenExclusions(input: {
+  leads: LeadRecord[];
+  hiddenIdentityKeys: string[];
+  hiddenCanonicalUrls: string[];
+}) {
+  const hiddenIdentitySet = new Set(
+    input.hiddenIdentityKeys
+      .map((value) => normalizeIdentityKey(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const hiddenCanonicalUrlSet = new Set(
+    input.hiddenCanonicalUrls
+      .map((value) => normalizeUrlForLookup(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  let hiddenDroppedCount = 0;
+  const filtered: LeadRecord[] = [];
+  for (const lead of input.leads) {
+    const identityKey = normalizeIdentityKey(lead.identityKey);
+    const canonicalUrl = normalizeUrlForLookup(lead.canonicalUrl);
+    if ((identityKey && hiddenIdentitySet.has(identityKey)) || (canonicalUrl && hiddenCanonicalUrlSet.has(canonicalUrl))) {
+      hiddenDroppedCount += 1;
+      continue;
+    }
+    filtered.push(lead);
+  }
+  return { filtered, hiddenDroppedCount };
+}
+
 /**
  * combined_result:
  * Merges retrieval + fresh search results and computes "new for this user".
@@ -55,8 +107,18 @@ export async function combinedResultNode(state: AgentGraphState) {
     leads: searchLeads,
     userLocation: state.location,
   });
+  const retrievalVisible = filterLeadsByHiddenExclusions({
+    leads: retrievalCountryFiltered.filtered,
+    hiddenIdentityKeys: state.hiddenLeadIdentityKeys,
+    hiddenCanonicalUrls: state.hiddenLeadCanonicalUrls,
+  });
+  const searchVisible = filterLeadsByHiddenExclusions({
+    leads: searchCountryFiltered.filtered,
+    hiddenIdentityKeys: state.hiddenLeadIdentityKeys,
+    hiddenCanonicalUrls: state.hiddenLeadCanonicalUrls,
+  });
   const retrievalRedundancyDeduped = dedupeRedundantLeads({
-    items: retrievalCountryFiltered.filtered,
+    items: retrievalVisible.filtered,
     toComparable: (lead) => ({
       sourceMetadataJson: lead.sourceMetadataJson ?? null,
       author: lead.author ?? null,
@@ -69,7 +131,7 @@ export async function combinedResultNode(state: AgentGraphState) {
     getRichnessScore: (lead) => leadRichnessScore(lead),
   });
   const searchRedundancyDeduped = dedupeRedundantLeads({
-    items: searchCountryFiltered.filtered,
+    items: searchVisible.filtered,
     toComparable: (lead) => ({
       sourceMetadataJson: lead.sourceMetadataJson ?? null,
       author: lead.author ?? null,
@@ -178,6 +240,8 @@ export async function combinedResultNode(state: AgentGraphState) {
   const countryMismatchDroppedCount =
     retrievalCountryFiltered.countryMismatchDroppedCount +
     searchCountryFiltered.countryMismatchDroppedCount;
+  const hiddenDroppedCount =
+    retrievalVisible.hiddenDroppedCount + searchVisible.hiddenDroppedCount;
   const searchCalls = Number(state.searchResults?.providerMetadataJson?.queryCount ?? 0);
   const resultsCount = state.searchResults?.searchDiagnostics?.totalKept ?? 0;
 
@@ -224,6 +288,7 @@ export async function combinedResultNode(state: AgentGraphState) {
       totalIterationTimeMs,
       crossSourceRedundancyDroppedCount,
       countryMismatchDroppedCount,
+      hiddenDroppedCount,
     },
   });
 
@@ -234,7 +299,7 @@ export async function combinedResultNode(state: AgentGraphState) {
     iteration: state.iteration,
     debugLog: appendDebug(
       state,
-      `combined_result => new=${combinedResults.totalNewLeadCountForUser}, deduped=${mergedLeads.length - combineDedupedLeads.length}, redundantDroppedCount=${crossSourceRedundancyDroppedCount}, countryMismatchDroppedCount=${countryMismatchDroppedCount}, stopReason=deferred_to_scoring_node, retrievalTimeMs=${retrievalLatencyMs}, searchTimeMs=${searchLatencyMs}, combineTimeMs=${combineTimeMs}, totalIterationTimeMs=${totalIterationTimeMs}, iteration => latency=${totalIterationTimeMs}ms, searchCalls=${searchCalls}, results=${resultsCount}`,
+      `combined_result => new=${combinedResults.totalNewLeadCountForUser}, deduped=${mergedLeads.length - combineDedupedLeads.length}, redundantDroppedCount=${crossSourceRedundancyDroppedCount}, countryMismatchDroppedCount=${countryMismatchDroppedCount}, hiddenDroppedCount=${hiddenDroppedCount}, stopReason=deferred_to_scoring_node, retrievalTimeMs=${retrievalLatencyMs}, searchTimeMs=${searchLatencyMs}, combineTimeMs=${combineTimeMs}, totalIterationTimeMs=${totalIterationTimeMs}, iteration => latency=${totalIterationTimeMs}ms, searchCalls=${searchCalls}, results=${resultsCount}`,
     ),
   };
 }

@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { SearchRunEnvelopeSchema } from "@/lib/schemas/api";
-import { ensureAnonymousSession } from "@/lib/api/session";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { getSearchRunResult } from "@/lib/api/search-runs";
 import { apiError, apiOk } from "@/lib/api/response";
 import { logger } from "@/lib/observability/logger";
@@ -29,9 +29,13 @@ export async function GET(
     }
 
     const cookieStore = await cookies();
-    const userSessionId = await ensureAnonymousSession(cookieStore);
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
     const envelope = await getSearchRunResult({
-      userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
       runId: parsed.data.id,
     });
     const payload = SearchRunEnvelopeSchema.parse(envelope);
@@ -55,4 +59,3 @@ export async function GET(
     });
   }
 }
-

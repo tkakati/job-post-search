@@ -4,7 +4,7 @@ import {
   SearchRunEnvelopeSchema,
   StartSearchRunInputSchema,
 } from "@/lib/schemas/api";
-import { ensureAnonymousSession } from "@/lib/api/session";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { startSearchRun } from "@/lib/api/search-runs";
 import { apiError, apiOk } from "@/lib/api/response";
 import { logger } from "@/lib/observability/logger";
@@ -25,9 +25,14 @@ export async function POST(req: Request) {
     }
 
     const cookieStore = await cookies();
-    const userSessionId = await ensureAnonymousSession(cookieStore);
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
     const envelope = await startSearchRun({
-      userSessionId,
+      userSessionId: session.userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
       ...parsed.data,
     });
 
@@ -36,7 +41,7 @@ export async function POST(req: Request) {
     logger.info("search_run_created", {
       runId: payload.runId,
       status: payload.status,
-      userSessionId,
+      userSessionId: session.userSessionId,
     });
     return apiOk(payload, status);
   } catch (error) {
@@ -50,4 +55,3 @@ export async function POST(req: Request) {
     });
   }
 }
-

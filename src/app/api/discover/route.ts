@@ -1,7 +1,11 @@
 import { cookies } from "next/headers";
-import { randomUUID } from "crypto";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { runAgent } from "@/lib/agent/run-agent";
-import { purgeExpiredLeads } from "@/lib/api/search-runs";
+import {
+  fetchHiddenLeadExclusions,
+  fetchPriorShownIdentitySet,
+  purgeExpiredLeads,
+} from "@/lib/api/search-runs";
 import { DiscoverInputSchema } from "@/lib/schemas/discover";
 import { apiError, apiOk } from "@/lib/api/response";
 import { logger } from "@/lib/observability/logger";
@@ -21,26 +25,34 @@ export async function POST(req: Request) {
   }
 
   const cookieStore = await cookies();
-  const cookieName = "job_discovery_user_id";
-  let userId = cookieStore.get(cookieName)?.value;
-  if (!userId) {
-    userId = randomUUID();
-    cookieStore.set(cookieName, userId, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-    });
-  }
+  const clerkUserId = await readOptionalClerkUserId();
+  const session = await ensureUserSessionContext({
+    cookieStore,
+    clerkUserId,
+  });
 
   const { role, location, recencyPreference } = parsed.data;
 
   try {
     await purgeExpiredLeads({ olderThanDays: 31 });
+    const shownLeadIdentityKeys = Array.from(
+      await fetchPriorShownIdentitySet({
+        userSessionId: session.userSessionId,
+        sessionScopeIds: session.sessionScopeIds,
+      }),
+    );
+    const hiddenExclusions = await fetchHiddenLeadExclusions({
+      userSessionId: session.userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
+    });
     const state = await runAgent({
-      userSessionId: userId,
+      userSessionId: session.userSessionId,
       role,
       location,
       recencyPreference,
+      shownLeadIdentityKeys,
+      hiddenLeadIdentityKeys: Array.from(hiddenExclusions.hiddenIdentityKeys),
+      hiddenLeadCanonicalUrls: Array.from(hiddenExclusions.hiddenCanonicalUrls),
     });
     return apiOk({
       runId: state.searchRunId ?? null,

@@ -302,35 +302,12 @@ function scoreLead(lead: LeadRecord, state: AgentGraphState) {
   const authorScore = authorStrengthScoreForLead(lead);
   const hiringIntentScore = hiringIntentScoreForLead(lead);
   const employmentTypeScore = employmentTypeScoreForLead(lead, state);
-  const intentBoost = Math.round(clamp01(hiringIntentScore) * 15);
-  const hasHardLocationMismatch =
-    state.locationIsHardFilter && locationScore.explicitResolvableMismatch;
-  let gateReason: ScoreBreakdown["gateReason"] = null;
-  if (hiringIntentScore === 0) {
-    gateReason = "hiring_intent_zero";
-  } else if (employmentTypeScore === 0) {
-    gateReason = "employment_type_mismatch";
-  } else if (hasHardLocationMismatch) {
-    gateReason = "hard_location_mismatch";
-  }
-
-  const isGated = gateReason !== null;
-  const baseScore = isGated
-    ? 0
-    : clamp01(
-        0.55 * Math.pow(roleScore.finalRoleScore, 1.5) +
-          0.25 * locationScore.score +
-          0.2 * authorScore.authorStrengthScore,
-      );
-
-  let finalScore100 = 0;
-  if (!isGated) {
-    let weightedScore100 = baseScore * 100 + intentBoost;
-    if (!state.locationIsHardFilter && locationScore.score < 0.5) {
-      weightedScore100 *= 0.75;
-    }
-    finalScore100 = Math.max(0, Math.min(100, weightedScore100));
-  }
+  const baseScore = clamp01(
+    0.5 * roleScore.finalRoleScore +
+      0.3 * locationScore.score +
+      0.2 * authorScore.authorStrengthScore,
+  );
+  const finalScore100 = Math.round(baseScore * 100);
 
   const breakdown: ScoreBreakdown = {
     roleMatchScore: roleScore.finalRoleScore,
@@ -339,14 +316,14 @@ function scoreLead(lead: LeadRecord, state: AgentGraphState) {
     hiringIntentScore,
     employmentTypeScore,
     baseScore,
-    intentBoost,
+    intentBoost: 0,
     finalScore100,
-    gatedToZero: isGated,
-    gateReason,
+    gatedToZero: false,
+    gateReason: null,
   };
   breakdown.engagementScore = breakdown.hiringIntentScore;
 
-  const leadScore = clamp01(finalScore100 / 100);
+  const leadScore = baseScore;
   return {
     leadScore,
     scoreBreakdown: breakdown,
@@ -360,7 +337,9 @@ export async function scoringNode(state: AgentGraphState) {
   const startedAt = Date.now();
   const combined = state.combinedResults;
   const inputLeads = combined?.newLeadsForUser ?? [];
-  queueRoleEmbeddingBackfill(inputLeads);
+  const filteredLeads = inputLeads;
+  const filteredOutMissingHiringIntentCount = 0;
+  queueRoleEmbeddingBackfill(filteredLeads);
   const isFirstIteration = state.iteration === 0;
   const hasFreshQueriesExecutedYet =
     state.generatedQueries != null ||
@@ -369,7 +348,7 @@ export async function scoringNode(state: AgentGraphState) {
   const isInitialRetrievalScoring = isFirstIteration && !hasFreshQueriesExecutedYet;
 
   const rankingStartedAt = Date.now();
-  const rankedLeads = inputLeads
+  const rankedLeads = filteredLeads
     .map((lead) => ({ ...lead, ...scoreLead(lead, state) }))
     .sort((a, b) => b.leadScore - a.leadScore);
   const topLeads = rankedLeads.slice(0, 20);
@@ -414,13 +393,14 @@ export async function scoringNode(state: AgentGraphState) {
     highQualityLeadsCount,
     avgScore: clamp01(avgScore),
     scoringDiagnostics: {
-      totalInputLeads: inputLeads.length,
+      totalInputLeads: filteredLeads.length,
       totalRankedLeads: rankedLeads.length,
       topLeadIdentityKeys: topLeads.map((lead) => lead.identityKey),
       elapsedMs: Date.now() - startedAt,
       rankingTimeMs,
       aggregationTimeMs,
       finalizeDecisionTimeMs,
+      filteredOutMissingHiringIntentCount,
     },
   });
 
@@ -487,7 +467,7 @@ export async function scoringNode(state: AgentGraphState) {
     iteration: nextIteration,
     debugLog: appendDebug(
       state,
-      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, location_stats={locationResolvedUser:${locationResolvedUserCount}, locationResolvedLead:${locationResolvedLeadCount}, locationUnknownFallbackCount:${locationUnknownFallbackCount}, locationDistanceScoredCount:${locationDistanceScoredCount}, locationAliasHitCount:${locationAliasHitCount}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
+      `scoring_node => mode=${isInitialRetrievalScoring ? "initial_retrieval_scoring" : "normal_scoring"}, scoring_profile=${scoringProfile}, total=${rankedLeads.length}, filtered_out_missing_hiring_intent=${filteredOutMissingHiringIntentCount}, highQuality=${highQualityLeadsCount}, avgScore=${clamp01(avgScore).toFixed(2)}, persistedLeadScores=${persistedLeadScores}, ${taskComplete ? "finalize" : "continue"}, stopReason=${stopReason ?? "continue"}, targetHighQualityLeads=${targetHighQualityLeads}, author_stats={deterministic_hits:${deterministicAuthorHits}, llm_fallback_hits:${llmFallbackHits}, unknown_count:${unknownAuthorHits}, phrase_hit_count:${phraseHitCount}, type_distribution:${JSON.stringify(authorTypeDistribution)}}, location_stats={locationResolvedUser:${locationResolvedUserCount}, locationResolvedLead:${locationResolvedLeadCount}, locationUnknownFallbackCount:${locationUnknownFallbackCount}, locationDistanceScoredCount:${locationDistanceScoredCount}, locationAliasHitCount:${locationAliasHitCount}}, lead_scores=[${leadScoreLog}], role_scores=[${roleScoreLog}], author_scores=[${authorScoreLog}], top_ranked=[${topRankedLog}]`,
     ),
   };
 }

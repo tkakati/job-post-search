@@ -64,6 +64,8 @@ export const AgentGraphStateSchema = z.object({
 
   // Inputs for filtering "already shown".
   shownLeadIdentityKeys: z.array(z.string()),
+  hiddenLeadIdentityKeys: z.array(z.string()),
+  hiddenLeadCanonicalUrls: z.array(z.string()),
 
   // Lightweight stateful debug trace for each node transition.
   debugLog: z.array(z.string()),
@@ -82,6 +84,8 @@ export function createInitialAgentGraphState(input: {
   maxIterations?: number;
   targetHighQualityLeads?: number;
   shownLeadIdentityKeys?: string[];
+  hiddenLeadIdentityKeys?: string[];
+  hiddenLeadCanonicalUrls?: string[];
   retrievalSummarySignal?: {
     newUnseenRetrievedLeads: number;
     totalRetrievedCandidates?: number;
@@ -138,6 +142,8 @@ export function createInitialAgentGraphState(input: {
     stopReason: null,
     taskComplete: false,
     shownLeadIdentityKeys: input.shownLeadIdentityKeys ?? [],
+    hiddenLeadIdentityKeys: input.hiddenLeadIdentityKeys ?? [],
+    hiddenLeadCanonicalUrls: input.hiddenLeadCanonicalUrls ?? [],
     debugLog: [],
   });
 }

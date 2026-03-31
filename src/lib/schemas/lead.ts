@@ -39,6 +39,7 @@ export const LeadRecordSchema = z.object({
 
 export const LeadCardViewModelSchema = z.object({
   leadId: z.number().int().positive().optional(),
+  identityKey: z.string().nullable().optional(),
   title: z.string().min(1),
   company: z.string().nullable().optional(),
   location: z.string().nullable().optional(),
@@ -57,12 +58,36 @@ export const LeadCardViewModelSchema = z.object({
   jobTitle: z.string().min(1).optional(),
   jobLocation: z.string().nullable().optional(),
   score: z.number().min(0).max(1).nullable().optional(),
+  scoreBreakdown: z
+    .object({
+      roleMatchScore: z.number().optional(),
+      locationMatchScore: z.number().optional(),
+      authorStrengthScore: z.number().optional(),
+      hiringIntentScore: z.number().optional(),
+      engagementScore: z.number().optional(),
+      employmentTypeScore: z.number().optional(),
+      baseScore: z.number().optional(),
+      intentBoost: z.number().optional(),
+      finalScore100: z.number().optional(),
+      gatedToZero: z.boolean().optional(),
+      gateReason: z
+        .enum(["hiring_intent_zero", "employment_type_mismatch", "hard_location_mismatch"])
+        .nullable()
+        .optional(),
+    })
+    .optional(),
   freshness: z.enum(["retrieved", "fresh", "both"]).optional(),
+  workMode: z.enum(["onsite", "hybrid", "remote"]).nullable().optional(),
+  employmentType: z
+    .enum(["full-time", "part-time", "contract", "internship"])
+    .nullable()
+    .optional(),
   provenanceSources: z.array(z.enum(["retrieval", "fresh_search"])).min(1),
   postedAt: IsoDateStringSchema.nullable().optional(),
   isNewForUser: z.boolean(),
   newBadge: z.literal("new").optional(),
   qualityBadge: z.enum(["high", "medium", "low", "unscored"]).optional(),
+  sourceMetadataJson: JsonRecordSchema.nullable().optional(),
 });
 
 export function parseLeadRecord(input: unknown) {

@@ -14,6 +14,7 @@ import { roleLocationKey } from "@/lib/utils/role-location";
 import { runAgent } from "@/lib/agent/run-agent";
 import {
   HistoryResponseSchema,
+  SavedPostFeedResponseSchema,
   SearchRunEnvelopeSchema,
   SearchRunResultSchema,
 } from "@/lib/schemas/api";
@@ -25,9 +26,12 @@ import { qualityBadgeFromScore } from "@/lib/scoring/thresholds";
 type SearchRunEnvelope = z.infer<typeof SearchRunEnvelopeSchema>;
 type SearchRunResult = z.infer<typeof SearchRunResultSchema>;
 type HistoryResponse = z.infer<typeof HistoryResponseSchema>;
+type SavedPostFeedResponse = z.infer<typeof SavedPostFeedResponseSchema>;
+type LeadCardScoreBreakdown = NonNullable<LeadCardViewModel["scoreBreakdown"]>;
 
 const SHOWN_EVENT_TYPE = "shown";
 const FEEDBACK_EVENT_TYPE = "feedback";
+const HIDDEN_EVENT_TYPE = "hidden";
 
 type LeadTrackedEventType =
   | "opened"
@@ -40,6 +44,23 @@ type LeadTrackedEventType =
 
 function toIso(date: Date) {
   return date.toISOString();
+}
+
+function normalizeSessionScopeIds(input: {
+  userSessionId?: string;
+  sessionScopeIds?: string[];
+}) {
+  const normalized = new Set<string>();
+  for (const value of input.sessionScopeIds ?? []) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    normalized.add(trimmed);
+  }
+  if (typeof input.userSessionId === "string" && input.userSessionId.trim()) {
+    normalized.add(input.userSessionId.trim());
+  }
+  return Array.from(normalized);
 }
 
 export async function purgeExpiredLeads(input?: { olderThanDays?: number }) {
@@ -105,7 +126,180 @@ function parseCardMetadata(
   };
 }
 
-export async function fetchPriorShownIdentitySet(userSessionId: string) {
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function resolveScoreFromMetadata(input: {
+  metadata: Record<string, unknown> | null;
+  scoreBreakdown?: LeadCardScoreBreakdown;
+}): number | null {
+  const rawScore = input.metadata?.score;
+  if (typeof rawScore === "number" && Number.isFinite(rawScore)) {
+    return clamp01(rawScore);
+  }
+  if (typeof rawScore === "string") {
+    const parsed = Number(rawScore);
+    if (Number.isFinite(parsed)) return clamp01(parsed);
+  }
+  if (
+    typeof input.scoreBreakdown?.finalScore100 === "number" &&
+    Number.isFinite(input.scoreBreakdown.finalScore100)
+  ) {
+    return clamp01(input.scoreBreakdown.finalScore100 / 100);
+  }
+  return null;
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeUrlForLookup(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function parseLeadLocationsFromDb(input: {
+  normalizedLocationJson: Record<string, unknown> | string | null;
+  fallbackRawLocation: string | null;
+}): LeadCardViewModel["locations"] {
+  if (input.normalizedLocationJson && typeof input.normalizedLocationJson === "object") {
+    const maybeLocations = (input.normalizedLocationJson as Record<string, unknown>).locations;
+    if (Array.isArray(maybeLocations)) {
+      const parsed = maybeLocations
+        .map((entry) => {
+          const obj = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
+          if (!obj) return null;
+          const raw = readString(obj.raw);
+          if (!raw) return null;
+          const city = readString(obj.city);
+          const state = readString(obj.state);
+          const country = readString(obj.country);
+          const lat = typeof obj.lat === "number" && Number.isFinite(obj.lat) ? obj.lat : null;
+          const lon = typeof obj.lon === "number" && Number.isFinite(obj.lon) ? obj.lon : null;
+          return { raw, city, state, country, lat, lon };
+        })
+        .filter((value): value is NonNullable<typeof value> => value !== null);
+      if (parsed.length > 0) return parsed;
+    }
+  }
+
+  const fallbackRaw = readString(input.fallbackRawLocation);
+  if (!fallbackRaw) return [];
+  return [{ raw: fallbackRaw, city: null, state: null, country: null, lat: null, lon: null }];
+}
+
+function readPostContext(
+  sourceMetadata: Record<string, unknown> | null,
+): {
+  primaryPostUrl: string | null;
+  primaryAuthorName: string | null;
+  primaryAuthorProfileUrl: string | null;
+} | null {
+  if (!sourceMetadata) return null;
+  const postContextRaw =
+    sourceMetadata.postContext && typeof sourceMetadata.postContext === "object"
+      ? (sourceMetadata.postContext as Record<string, unknown>)
+      : null;
+  if (!postContextRaw) return null;
+  return {
+    primaryPostUrl: readString(postContextRaw.primaryPostUrl),
+    primaryAuthorName: readString(postContextRaw.primaryAuthorName),
+    primaryAuthorProfileUrl: readString(postContextRaw.primaryAuthorProfileUrl),
+  };
+}
+
+function parseEmploymentType(
+  value: unknown,
+): LeadCardViewModel["employmentType"] {
+  if (value === "full-time") return "full-time";
+  if (value === "part-time") return "part-time";
+  if (value === "contract") return "contract";
+  if (value === "internship") return "internship";
+  return null;
+}
+
+function parseWorkMode(value: unknown): LeadCardViewModel["workMode"] {
+  if (value === "onsite") return "onsite";
+  if (value === "hybrid") return "hybrid";
+  if (value === "remote") return "remote";
+  return null;
+}
+
+function normalizeScoreBreakdownGateReason(
+  value: unknown,
+): LeadCardScoreBreakdown["gateReason"] {
+  if (value === "hiring_intent_zero") return value;
+  if (value === "employment_type_mismatch") return value;
+  if (value === "hard_location_mismatch") return value;
+  return null;
+}
+
+function normalizeScoreBreakdown(
+  value: unknown,
+): LeadCardScoreBreakdown | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const normalized: LeadCardScoreBreakdown = {};
+
+  if (typeof raw.roleMatchScore === "number" && Number.isFinite(raw.roleMatchScore)) {
+    normalized.roleMatchScore = raw.roleMatchScore;
+  }
+  if (typeof raw.locationMatchScore === "number" && Number.isFinite(raw.locationMatchScore)) {
+    normalized.locationMatchScore = raw.locationMatchScore;
+  }
+  if (typeof raw.authorStrengthScore === "number" && Number.isFinite(raw.authorStrengthScore)) {
+    normalized.authorStrengthScore = raw.authorStrengthScore;
+  }
+  if (typeof raw.hiringIntentScore === "number" && Number.isFinite(raw.hiringIntentScore)) {
+    normalized.hiringIntentScore = raw.hiringIntentScore;
+  }
+  if (typeof raw.engagementScore === "number" && Number.isFinite(raw.engagementScore)) {
+    normalized.engagementScore = raw.engagementScore;
+  }
+  if (typeof raw.employmentTypeScore === "number" && Number.isFinite(raw.employmentTypeScore)) {
+    normalized.employmentTypeScore = raw.employmentTypeScore;
+  }
+  if (typeof raw.baseScore === "number" && Number.isFinite(raw.baseScore)) {
+    normalized.baseScore = raw.baseScore;
+  }
+  if (typeof raw.intentBoost === "number" && Number.isFinite(raw.intentBoost)) {
+    normalized.intentBoost = raw.intentBoost;
+  }
+  if (typeof raw.finalScore100 === "number" && Number.isFinite(raw.finalScore100)) {
+    normalized.finalScore100 = raw.finalScore100;
+  }
+  if (typeof raw.gatedToZero === "boolean") {
+    normalized.gatedToZero = raw.gatedToZero;
+  }
+  if ("gateReason" in raw) {
+    normalized.gateReason = normalizeScoreBreakdownGateReason(raw.gateReason);
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+export async function fetchPriorShownIdentitySet(input: {
+  sessionScopeIds: string[];
+  userSessionId?: string;
+}) {
+  const scopeIds = normalizeSessionScopeIds(input);
+  if (scopeIds.length === 0) return new Set<string>();
+
   const db = dbClient();
   const rows = await db
     .select({
@@ -116,17 +310,106 @@ export async function fetchPriorShownIdentitySet(userSessionId: string) {
     })
     .from(shownLeads)
     .innerJoin(leads, eq(leads.id, shownLeads.leadId))
-    .where(eq(shownLeads.userSessionId, userSessionId));
+    .where(inArray(shownLeads.userSessionId, scopeIds));
   return new Set(
     rows.map((r) =>
-    canonicalLeadIdentity({
-      url: r.canonicalUrl,
-      titleOrRole: r.titleOrRole,
-      company: r.company,
-      location: r.location,
-    }).identityKey,
-  ),
+      canonicalLeadIdentity({
+        url: r.canonicalUrl,
+        titleOrRole: r.titleOrRole,
+        company: r.company,
+        location: r.location,
+      }).identityKey,
+    ),
   );
+}
+
+export async function fetchHiddenLeadExclusions(input: {
+  sessionScopeIds: string[];
+  userSessionId?: string;
+}) {
+  const scopeIds = normalizeSessionScopeIds(input);
+  if (scopeIds.length === 0) {
+    return {
+      hiddenLeadIds: new Set<number>(),
+      hiddenIdentityKeys: new Set<string>(),
+      hiddenCanonicalUrls: new Set<string>(),
+    };
+  }
+
+  const db = dbClient();
+  const rows = await db
+    .select({
+      leadId: leadEvents.leadId,
+      identityKey: leads.identityKey,
+      canonicalUrl: leads.canonicalUrl,
+    })
+    .from(leadEvents)
+    .innerJoin(leads, eq(leads.id, leadEvents.leadId))
+    .where(
+      and(
+        inArray(leadEvents.userSessionId, scopeIds),
+        eq(leadEvents.eventType, HIDDEN_EVENT_TYPE),
+      ),
+    );
+
+  const hiddenLeadIds = new Set<number>();
+  const hiddenIdentityKeys = new Set<string>();
+  const hiddenCanonicalUrls = new Set<string>();
+  for (const row of rows) {
+    hiddenLeadIds.add(row.leadId);
+    if (typeof row.identityKey === "string" && row.identityKey.trim()) {
+      hiddenIdentityKeys.add(row.identityKey.trim().toLowerCase());
+    }
+    if (typeof row.canonicalUrl === "string" && row.canonicalUrl.trim()) {
+      hiddenCanonicalUrls.add(row.canonicalUrl.trim().toLowerCase());
+    }
+  }
+
+  return {
+    hiddenLeadIds,
+    hiddenIdentityKeys,
+    hiddenCanonicalUrls,
+  };
+}
+
+export async function createSearchRunRecord(input: {
+  userSessionId: string;
+  role: string;
+  location: string;
+  recencyPreference: "past-24h" | "past-week" | "past-month";
+}) {
+  const db = dbClient();
+  const now = new Date();
+  const [inserted] = await db
+    .insert(searchRuns)
+    .values({
+      userSessionId: input.userSessionId,
+      role: input.role,
+      location: input.location,
+      roleLocationKey: roleLocationKey(input.role, input.location),
+      recencyPreference: recencyPreferenceToDays(input.recencyPreference),
+      iterationCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: searchRuns.id });
+  return inserted?.id ?? null;
+}
+
+export async function finalizeSearchRunRecord(input: {
+  runId: number;
+  iterationCount: number;
+  stopReason: "sufficient_high_quality_leads" | "max_iterations" | null;
+}) {
+  const db = dbClient();
+  await db
+    .update(searchRuns)
+    .set({
+      iterationCount: input.iterationCount,
+      finalStopReason: input.stopReason,
+      updatedAt: new Date(),
+    })
+    .where(eq(searchRuns.id, input.runId));
 }
 
 export async function markFinalResponseLeadsAsShown(input: {
@@ -136,7 +419,9 @@ export async function markFinalResponseLeadsAsShown(input: {
   finalLeads: LeadCardViewModel[];
 }) {
   const db = dbClient();
-  const urls = input.finalLeads.map((l) => l.canonicalUrl);
+  const urls = input.finalLeads
+    .map((l) => l.canonicalUrl)
+    .filter((value) => typeof value === "string" && value.trim().length > 0);
   if (urls.length === 0) return;
 
   const leadRows = await db
@@ -149,8 +434,6 @@ export async function markFinalResponseLeadsAsShown(input: {
       snippet: leads.snippet,
       postedAt: leads.postedAt,
       sourceType: leads.sourceType,
-      leadScore: leads.leadScore,
-      hiringIntentScore: leads.hiringIntentScore,
     })
     .from(leads)
     .where(inArray(leads.canonicalUrl, urls));
@@ -176,6 +459,14 @@ export async function markFinalResponseLeadsAsShown(input: {
     .map((leadCard) => {
       const row = byUrl.get(leadCard.canonicalUrl);
       if (!row) return null;
+      const scoreBreakdown = normalizeScoreBreakdown(leadCard.scoreBreakdown);
+      const score =
+        typeof leadCard.score === "number" && Number.isFinite(leadCard.score)
+          ? clamp01(leadCard.score)
+          : resolveScoreFromMetadata({
+              metadata: null,
+              scoreBreakdown,
+            });
       return {
         userSessionId: input.userSessionId,
         leadId: row.id,
@@ -190,13 +481,13 @@ export async function markFinalResponseLeadsAsShown(input: {
           sourceType: leadCard.sourceType ?? row.sourceType,
           sourceBadge: leadCard.sourceBadge ?? "fresh",
           provenanceSources: leadCard.provenanceSources ?? ["fresh_search"],
-          newBadge: leadCard.newBadge ?? "new",
-          qualityBadge:
-            leadCard.qualityBadge ??
-            mapQualityBadge(row.leadScore ?? row.hiringIntentScore ?? 0),
+          newBadge: leadCard.newBadge,
+          ...(typeof score === "number" ? { score } : {}),
+          qualityBadge: leadCard.qualityBadge ?? mapQualityBadge(score),
           postedAt:
             leadCard.postedAt ??
             (row.postedAt instanceof Date ? row.postedAt.toISOString() : null),
+          ...(scoreBreakdown ? { scoreBreakdown } : {}),
         },
       };
     })
@@ -208,29 +499,21 @@ export async function markFinalResponseLeadsAsShown(input: {
 
 export async function startSearchRun(input: {
   userSessionId: string;
+  sessionScopeIds?: string[];
   role: string;
   location: string;
   locationIsHardFilter?: boolean;
   employmentType?: "full-time" | "part-time" | "contract" | "internship" | null;
   recencyPreference: "past-24h" | "past-week" | "past-month";
 }): Promise<SearchRunEnvelope> {
-  const db = dbClient();
   await purgeExpiredLeads({ olderThanDays: 31 });
-  const now = new Date();
-  const [inserted] = await db
-    .insert(searchRuns)
-    .values({
-      userSessionId: input.userSessionId,
-      role: input.role,
-      location: input.location,
-      roleLocationKey: roleLocationKey(input.role, input.location),
-      recencyPreference: recencyPreferenceToDays(input.recencyPreference),
-      iterationCount: 0,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning({ id: searchRuns.id });
-  const runId = inserted?.id;
+  const runId = await createSearchRunRecord({
+    userSessionId: input.userSessionId,
+    role: input.role,
+    location: input.location,
+    recencyPreference: input.recencyPreference,
+  });
+
   if (!runId) {
     return {
       runId: -1,
@@ -241,10 +524,23 @@ export async function startSearchRun(input: {
     };
   }
 
+  const sessionScopeIds = normalizeSessionScopeIds({
+    userSessionId: input.userSessionId,
+    sessionScopeIds: input.sessionScopeIds,
+  });
+
   try {
     const shownLeadIdentityKeys = Array.from(
-      await fetchPriorShownIdentitySet(input.userSessionId),
+      await fetchPriorShownIdentitySet({
+        userSessionId: input.userSessionId,
+        sessionScopeIds,
+      }),
     );
+    const hiddenExclusions = await fetchHiddenLeadExclusions({
+      userSessionId: input.userSessionId,
+      sessionScopeIds,
+    });
+
     const state = await runAgent({
       userSessionId: input.userSessionId,
       role: input.role,
@@ -254,19 +550,18 @@ export async function startSearchRun(input: {
       recencyPreference: input.recencyPreference,
       searchRunId: runId,
       shownLeadIdentityKeys,
+      hiddenLeadIdentityKeys: Array.from(hiddenExclusions.hiddenIdentityKeys),
+      hiddenLeadCanonicalUrls: Array.from(hiddenExclusions.hiddenCanonicalUrls),
     });
 
     const final = state.finalResponse;
     const iterationsUsed = final?.iterationsUsed ?? state.iteration + 1;
     const stopReason = final?.stopReason ?? state.stopReason;
-    await db
-      .update(searchRuns)
-      .set({
-        iterationCount: iterationsUsed,
-        finalStopReason: stopReason,
-        updatedAt: new Date(),
-      })
-      .where(eq(searchRuns.id, runId));
+    await finalizeSearchRunRecord({
+      runId,
+      iterationCount: iterationsUsed,
+      stopReason,
+    });
 
     if (final) {
       await markFinalResponseLeadsAsShown({
@@ -318,10 +613,11 @@ export async function startSearchRun(input: {
       error: "Agent run completed without final response",
     };
   } catch (error) {
-    await db
-      .update(searchRuns)
-      .set({ finalStopReason: "max_iterations", updatedAt: new Date() })
-      .where(eq(searchRuns.id, runId));
+    await finalizeSearchRunRecord({
+      runId,
+      iterationCount: 0,
+      stopReason: "max_iterations",
+    });
     return {
       runId,
       status: "failed",
@@ -333,9 +629,22 @@ export async function startSearchRun(input: {
 }
 
 export async function getSearchRunResult(input: {
-  userSessionId: string;
+  sessionScopeIds: string[];
   runId: number;
 }): Promise<SearchRunEnvelope> {
+  const scopeIds = normalizeSessionScopeIds({
+    sessionScopeIds: input.sessionScopeIds,
+  });
+  if (scopeIds.length === 0) {
+    return {
+      runId: input.runId,
+      status: "failed",
+      pollAfterMs: null,
+      result: null,
+      error: "Search run not found",
+    };
+  }
+
   const db = dbClient();
   const run = await db
     .select({
@@ -351,7 +660,7 @@ export async function getSearchRunResult(input: {
     .where(
       and(
         eq(searchRuns.id, input.runId),
-        eq(searchRuns.userSessionId, input.userSessionId),
+        inArray(searchRuns.userSessionId, scopeIds),
       ),
     )
     .limit(1);
@@ -375,7 +684,7 @@ export async function getSearchRunResult(input: {
     .from(leadEvents)
     .where(
       and(
-        eq(leadEvents.userSessionId, input.userSessionId),
+        inArray(leadEvents.userSessionId, scopeIds),
         eq(leadEvents.searchRunId, input.runId),
         eq(leadEvents.eventType, SHOWN_EVENT_TYPE),
       ),
@@ -407,8 +716,6 @@ export async function getSearchRunResult(input: {
             snippet: leads.snippet,
             sourceType: leads.sourceType,
             postedAt: leads.postedAt,
-            leadScore: leads.leadScore,
-            hiringIntentScore: leads.hiringIntentScore,
           })
           .from(leads)
           .where(inArray(leads.id, leadIds))
@@ -417,34 +724,45 @@ export async function getSearchRunResult(input: {
 
   const cards: LeadCardViewModel[] = [];
   for (const event of shownEvents) {
-    const row = leadById.get(event.leadId);
-    if (!row) continue;
+    const leadRow = leadById.get(event.leadId);
+    if (!leadRow) continue;
     const metadata = parseCardMetadata(
       (event.metadataJson ?? null) as Record<string, unknown> | null,
     );
+    const scoreBreakdown = normalizeScoreBreakdown(
+      (event.metadataJson as Record<string, unknown> | null)?.scoreBreakdown,
+    );
+    const metadataRecord =
+      event.metadataJson && typeof event.metadataJson === "object"
+        ? (event.metadataJson as Record<string, unknown>)
+        : null;
+    const score = resolveScoreFromMetadata({
+      metadata: metadataRecord,
+      scoreBreakdown,
+    });
     cards.push({
-      leadId: row.id,
-      title: (event.metadataJson?.title as string | undefined) ?? row.titleOrRole,
+      leadId: leadRow.id,
+      title: (event.metadataJson?.title as string | undefined) ?? leadRow.titleOrRole,
       company:
-        (event.metadataJson?.company as string | null | undefined) ?? row.company,
+        (event.metadataJson?.company as string | null | undefined) ?? leadRow.company,
       location:
-        (event.metadataJson?.location as string | null | undefined) ?? row.location,
-      canonicalUrl: row.canonicalUrl,
-      url: row.canonicalUrl,
+        (event.metadataJson?.location as string | null | undefined) ?? leadRow.location,
+      canonicalUrl: leadRow.canonicalUrl,
+      url: leadRow.canonicalUrl,
       snippet:
-        (event.metadataJson?.snippet as string | null | undefined) ?? row.snippet,
+        (event.metadataJson?.snippet as string | null | undefined) ?? leadRow.snippet,
       sourceType:
-        (event.metadataJson?.sourceType as string | undefined) ?? row.sourceType,
+        (event.metadataJson?.sourceType as string | undefined) ?? leadRow.sourceType,
       sourceBadge: metadata.sourceBadge ?? "fresh",
       provenanceSources: metadata.provenanceSources ?? ["fresh_search"],
       postedAt:
         (event.metadataJson?.postedAt as string | null | undefined) ??
-        (row.postedAt instanceof Date ? row.postedAt.toISOString() : null),
+        (leadRow.postedAt instanceof Date ? leadRow.postedAt.toISOString() : null),
+      score,
       isNewForUser: true,
       newBadge: "new",
-      qualityBadge:
-        metadata.qualityBadge ??
-        mapQualityBadge(row.leadScore ?? row.hiringIntentScore),
+      qualityBadge: metadata.qualityBadge ?? mapQualityBadge(score),
+      ...(scoreBreakdown ? { scoreBreakdown } : {}),
     });
   }
 
@@ -548,9 +866,12 @@ export async function recordLeadFeedback(input: {
 }
 
 export async function getRecentHistory(input: {
-  userSessionId: string;
+  sessionScopeIds: string[];
   limit: number;
 }): Promise<HistoryResponse> {
+  const scopeIds = normalizeSessionScopeIds({ sessionScopeIds: input.sessionScopeIds });
+  if (scopeIds.length === 0) return { items: [] };
+
   const db = dbClient();
   const rows = await db
     .select({
@@ -564,7 +885,7 @@ export async function getRecentHistory(input: {
       updatedAt: searchRuns.updatedAt,
     })
     .from(searchRuns)
-    .where(eq(searchRuns.userSessionId, input.userSessionId))
+    .where(inArray(searchRuns.userSessionId, scopeIds))
     .orderBy(desc(searchRuns.createdAt))
     .limit(input.limit);
 
@@ -584,4 +905,131 @@ export async function getRecentHistory(input: {
       updatedAt: toIso(row.updatedAt),
     })),
   };
+}
+
+export async function getSavedPostFeed(input: {
+  sessionScopeIds: string[];
+  limit?: number;
+}): Promise<SavedPostFeedResponse> {
+  const scopeIds = normalizeSessionScopeIds({ sessionScopeIds: input.sessionScopeIds });
+  if (scopeIds.length === 0) return { items: [] };
+
+  const db = dbClient();
+  const hidden = await fetchHiddenLeadExclusions({ sessionScopeIds: scopeIds });
+  const fetchLimit = Math.max((input.limit ?? 200) * 6, 500);
+  const shownRows = await db
+    .select({
+      leadId: leadEvents.leadId,
+      shownAt: leadEvents.createdAt,
+      searchRunId: leadEvents.searchRunId,
+      metadataJson: leadEvents.metadataJson,
+      canonicalUrl: leads.canonicalUrl,
+      identityKey: leads.identityKey,
+      titleOrRole: leads.titleOrRole,
+      company: leads.company,
+      location: leads.location,
+      normalizedLocationJson: leads.normalizedLocationJson,
+      employmentType: leads.employmentType,
+      workMode: leads.workMode,
+      author: leads.author,
+      snippet: leads.snippet,
+      sourceType: leads.sourceType,
+      postedAt: leads.postedAt,
+      sourceMetadataJson: leads.sourceMetadataJson,
+      runRole: searchRuns.role,
+      runLocation: searchRuns.location,
+    })
+    .from(leadEvents)
+    .innerJoin(leads, eq(leads.id, leadEvents.leadId))
+    .leftJoin(searchRuns, eq(searchRuns.id, leadEvents.searchRunId))
+    .where(
+      and(
+        inArray(leadEvents.userSessionId, scopeIds),
+        eq(leadEvents.eventType, SHOWN_EVENT_TYPE),
+      ),
+    )
+    .orderBy(desc(leadEvents.createdAt))
+    .limit(fetchLimit);
+
+  const seenLeadIds = new Set<number>();
+  const items: SavedPostFeedResponse["items"] = [];
+  for (const row of shownRows) {
+    if (seenLeadIds.has(row.leadId)) continue;
+    seenLeadIds.add(row.leadId);
+
+    const identityKey = readString(row.identityKey)?.toLowerCase() ?? null;
+    const canonicalUrl = normalizeUrlForLookup(row.canonicalUrl);
+    if (hidden.hiddenLeadIds.has(row.leadId)) continue;
+    if (identityKey && hidden.hiddenIdentityKeys.has(identityKey)) continue;
+    if (canonicalUrl && hidden.hiddenCanonicalUrls.has(canonicalUrl)) continue;
+
+    const sourceMetadata =
+      row.sourceMetadataJson && typeof row.sourceMetadataJson === "object"
+        ? (row.sourceMetadataJson as Record<string, unknown>)
+        : null;
+    const metadata =
+      row.metadataJson && typeof row.metadataJson === "object"
+        ? (row.metadataJson as Record<string, unknown>)
+        : null;
+    const cardMetadata = parseCardMetadata(metadata);
+    const scoreBreakdown = normalizeScoreBreakdown(metadata?.scoreBreakdown);
+    const postContext = readPostContext(sourceMetadata);
+    const score = resolveScoreFromMetadata({ metadata, scoreBreakdown });
+    const sourceBadge = cardMetadata.sourceBadge ?? "fresh";
+    const locations = parseLeadLocationsFromDb({
+      normalizedLocationJson: row.normalizedLocationJson,
+      fallbackRawLocation: row.location,
+    });
+
+    items.push({
+      lead: {
+        leadId: row.leadId,
+        identityKey: readString(row.identityKey),
+        title: readString((metadata as Record<string, unknown> | null)?.title) ?? row.titleOrRole,
+        company: readString((metadata as Record<string, unknown> | null)?.company) ?? row.company,
+        location: readString((metadata as Record<string, unknown> | null)?.location) ?? row.location,
+        locations,
+        rawLocationText: row.location,
+        canonicalUrl: row.canonicalUrl,
+        url: row.canonicalUrl,
+        postUrl: postContext?.primaryPostUrl ?? row.canonicalUrl,
+        postAuthor: postContext?.primaryAuthorName ?? row.author,
+        postAuthorUrl: postContext?.primaryAuthorProfileUrl ?? null,
+        jobTitle: row.titleOrRole,
+        jobLocation:
+          readString((metadata as Record<string, unknown> | null)?.location) ?? row.location,
+        score,
+        ...(scoreBreakdown ? { scoreBreakdown } : {}),
+        freshness: sourceBadge,
+        snippet: readString((metadata as Record<string, unknown> | null)?.snippet) ?? row.snippet,
+        sourceType: readString((metadata as Record<string, unknown> | null)?.sourceType) ?? row.sourceType,
+        sourceBadge,
+        provenanceSources:
+          cardMetadata.provenanceSources ??
+          (sourceBadge === "both"
+            ? ["retrieval", "fresh_search"]
+            : sourceBadge === "retrieved"
+              ? ["retrieval"]
+              : ["fresh_search"]),
+        postedAt:
+          readString((metadata as Record<string, unknown> | null)?.postedAt) ??
+          (row.postedAt instanceof Date ? row.postedAt.toISOString() : null),
+        isNewForUser: false,
+        qualityBadge: cardMetadata.qualityBadge ?? mapQualityBadge(score),
+        workMode: parseWorkMode(row.workMode),
+        employmentType: parseEmploymentType(row.employmentType),
+        sourceMetadataJson: sourceMetadata,
+      },
+      runContext: {
+        role: readString(row.runRole) ?? "Unknown role",
+        location: readString(row.runLocation) ?? "Unknown location",
+        searchRunId: row.searchRunId ?? null,
+        shownAt: toIso(row.shownAt),
+      },
+    });
+
+    if (items.length >= (input.limit ?? 200)) break;
+  }
+
+  return { items };
 }

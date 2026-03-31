@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import Image from "next/image";
+import { SignInButton, UserButton, useAuth } from "@clerk/nextjs";
 import { cn } from "@/lib/utils";
 import { useProductViewMode } from "@/app/(product)/view-mode-context";
 
@@ -14,6 +15,7 @@ export function ProductHeader() {
   const headerRef = React.useRef<HTMLElement | null>(null);
   const [headerOffsetPx, setHeaderOffsetPx] = React.useState(0);
   const { mode: activeView, setMode } = useProductViewMode();
+  const clerkEnabled = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
   React.useEffect(() => {
     const processScrollFrame = () => {
@@ -131,8 +133,37 @@ export function ProductHeader() {
           </div>
         </nav>
 
-        <div className="ml-auto w-[220px]" aria-hidden />
+        <div className="ml-auto flex w-[220px] items-center justify-end">
+          {clerkEnabled ? <ClerkHeaderAuthControls /> : null}
+        </div>
       </div>
     </header>
+  );
+}
+
+function ClerkHeaderAuthControls() {
+  const { isSignedIn } = useAuth();
+
+  if (isSignedIn) {
+    return (
+      <UserButton
+        appearance={{
+          elements: {
+            userButtonAvatarBox: "h-8 w-8",
+          },
+        }}
+      />
+    );
+  }
+
+  return (
+    <SignInButton mode="modal">
+      <button
+        type="button"
+        className="inline-flex h-8 items-center justify-center rounded-md border border-[var(--intent-muted-border)] px-3 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+      >
+        Sign in
+      </button>
+    </SignInButton>
   );
 }

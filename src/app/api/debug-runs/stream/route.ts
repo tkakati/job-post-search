@@ -1,7 +1,14 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { ensureAnonymousSession } from "@/lib/api/session";
-import { fetchPriorShownIdentitySet, purgeExpiredLeads } from "@/lib/api/search-runs";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
+import {
+  createSearchRunRecord,
+  fetchHiddenLeadExclusions,
+  fetchPriorShownIdentitySet,
+  finalizeSearchRunRecord,
+  markFinalResponseLeadsAsShown,
+  purgeExpiredLeads,
+} from "@/lib/api/search-runs";
 import { buildLeadCardsFromLeads } from "@/lib/agent/formatters/build-lead-cards";
 import { createAgentGraph } from "@/lib/agent/graph";
 import {
@@ -13,7 +20,6 @@ import { FinalResponseOutputSchema } from "@/lib/schemas/contracts";
 import { env } from "@/lib/env";
 import { runWithDebugApiCallSink } from "@/lib/debug/api-call-sink";
 import { logger } from "@/lib/observability/logger";
-import type { LeadRecord } from "@/lib/types/contracts";
 
 export const runtime = "nodejs";
 
@@ -49,19 +55,41 @@ function line(value: unknown) {
   return `${JSON.stringify(value)}\n`;
 }
 
-function buildFreshPreviewLeadCards(normalizedLeads: LeadRecord[]) {
-  const selectedLeads = normalizedLeads.slice(0, 20);
-  const leadProvenance = selectedLeads.map((lead) => ({
-    identityKey: lead.identityKey,
-    sources: ["fresh_search"] as Array<"fresh_search">,
-    isNewForUser: true,
-  }));
+function normalizeIdentityKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
 
-  return buildLeadCardsFromLeads({
-    selectedLeads,
-    leadProvenance,
-    maxLeads: 20,
-    scope: "all",
+function normalizeUrlForLookup(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function filterHiddenLeadCards(
+  leads: z.infer<typeof FinalResponseOutputSchema.shape.leads>,
+  hiddenIdentityKeys: Set<string>,
+  hiddenCanonicalUrls: Set<string>,
+) {
+  return leads.filter((lead) => {
+    const identityKey = normalizeIdentityKey(lead.identityKey);
+    if (identityKey && hiddenIdentityKeys.has(identityKey)) return false;
+    const canonicalUrl = normalizeUrlForLookup(lead.canonicalUrl);
+    if (canonicalUrl && hiddenCanonicalUrls.has(canonicalUrl)) return false;
+    const postUrl = normalizeUrlForLookup(lead.postUrl);
+    if (postUrl && hiddenCanonicalUrls.has(postUrl)) return false;
+    return true;
   });
 }
 
@@ -126,9 +154,20 @@ export async function POST(req: Request) {
   }
 
   const cookieStore = await cookies();
-  const userSessionId = await ensureAnonymousSession(cookieStore);
+  const clerkUserId = await readOptionalClerkUserId();
+  const session = await ensureUserSessionContext({
+    cookieStore,
+    clerkUserId,
+  });
   await purgeExpiredLeads({ olderThanDays: 31 });
-  const persistedShownSet = await fetchPriorShownIdentitySet(userSessionId);
+  const persistedShownSet = await fetchPriorShownIdentitySet({
+    userSessionId: session.userSessionId,
+    sessionScopeIds: session.sessionScopeIds,
+  });
+  const hiddenExclusions = await fetchHiddenLeadExclusions({
+    userSessionId: session.userSessionId,
+    sessionScopeIds: session.sessionScopeIds,
+  });
   const requestShownSet = new Set(
     (parsed.data.shownIdentityKeys ?? [])
       .map((value) => value.trim())
@@ -137,9 +176,37 @@ export async function POST(req: Request) {
   const shownLeadIdentityKeys = Array.from(
     new Set([...persistedShownSet, ...requestShownSet]),
   );
+  const hiddenIdentityKeys = new Set(
+    Array.from(hiddenExclusions.hiddenIdentityKeys).map((value) => value.toLowerCase()),
+  );
+  const hiddenCanonicalUrls = new Set(
+    Array.from(hiddenExclusions.hiddenCanonicalUrls)
+      .map((value) => normalizeUrlForLookup(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const searchRunId = await createSearchRunRecord({
+    userSessionId: session.userSessionId,
+    role: parsed.data.role,
+    location: parsed.data.location,
+    recencyPreference: parsed.data.recencyPreference,
+  });
+
+  if (!searchRunId) {
+    return Response.json(
+      {
+        ok: false,
+        error: {
+          code: "RUN_CREATE_FAILED",
+          message: "Could not create search run for debug stream.",
+        },
+      },
+      { status: 500 },
+    );
+  }
 
   const initial = createInitialAgentGraphState({
-    userSessionId,
+    userSessionId: session.userSessionId,
+    searchRunId,
     role: parsed.data.role,
     location: parsed.data.location,
     locationIsHardFilter: parsed.data.locationIsHardFilter ?? false,
@@ -148,6 +215,8 @@ export async function POST(req: Request) {
     maxIterations: parsed.data.maxIterations,
     targetHighQualityLeads: parsed.data.targetHighQualityLeads,
     shownLeadIdentityKeys,
+    hiddenLeadIdentityKeys: Array.from(hiddenIdentityKeys),
+    hiddenLeadCanonicalUrls: Array.from(hiddenCanonicalUrls),
   });
 
   const graph = createAgentGraph();
@@ -171,7 +240,6 @@ export async function POST(req: Request) {
         log: string;
       }> = [];
       let hasEmittedInterimResults = false;
-      let hasEmittedFreshPreview = false;
 
       try {
         let apiCallSeq = 0;
@@ -253,51 +321,6 @@ export async function POST(req: Request) {
               });
 
               if (
-                !hasEmittedFreshPreview &&
-                node === "search" &&
-                state.searchResults &&
-                Array.isArray(state.searchResults.normalizedSearchResults) &&
-                state.searchResults.normalizedSearchResults.length > 0
-              ) {
-                const freshPreviewLeads = buildFreshPreviewLeadCards(
-                  state.searchResults.normalizedSearchResults,
-                );
-
-                if (freshPreviewLeads.length > 0) {
-                  const previewPayload = FinalResponseOutputSchema.parse({
-                    taskComplete: false,
-                    stopReason: null,
-                    plannerMode: state.plannerOutput?.plannerMode ?? "exploit_heavy",
-                    iterationsUsed: state.iteration + 1,
-                    leads: freshPreviewLeads,
-                    summary: `Showing ${freshPreviewLeads.length} fresh posts while extraction and scoring continue.`,
-                    totalCounts: {
-                      retrieved: state.combinedResults?.totalRetrievedCount ?? 0,
-                      generated: state.searchResults.searchDiagnostics.totalKept ?? freshPreviewLeads.length,
-                      merged: state.combinedResults?.totalMergedCount ?? freshPreviewLeads.length,
-                      newForUser: state.combinedResults?.totalNewLeadCountForUser ?? freshPreviewLeads.length,
-                    },
-                    emptyState: {
-                      isEmpty: false,
-                      title: "Fresh posts ready",
-                      message: "Showing fresh posts while deeper extraction and scoring continue.",
-                    },
-                  });
-
-                  controller.enqueue(
-                    encoder.encode(
-                      line({
-                        type: "interim_results",
-                        phase: "fresh_search_preview",
-                        payload: previewPayload,
-                      }),
-                    ),
-                  );
-                  hasEmittedFreshPreview = true;
-                }
-              }
-
-              if (
                 !hasEmittedInterimResults &&
                 node === "scoring_node" &&
                 state.scoringResults &&
@@ -321,14 +344,19 @@ export async function POST(req: Request) {
                     maxLeads: 20,
                     scope: "retrieval_only",
                   });
+                  const visibleInterimLeads = filterHiddenLeadCards(
+                    interimLeads,
+                    hiddenIdentityKeys,
+                    hiddenCanonicalUrls,
+                  );
 
                   const interimPayload = FinalResponseOutputSchema.parse({
                     taskComplete: false,
                     stopReason: null,
                     plannerMode: state.plannerOutput?.plannerMode ?? "exploit_heavy",
                     iterationsUsed: state.iteration + 1,
-                    leads: interimLeads,
-                    summary: `Showing ${interimLeads.length} high-quality retrieved leads while we fetch more relevant posts.`,
+                    leads: visibleInterimLeads,
+                    summary: `Showing ${visibleInterimLeads.length} high-quality retrieved leads while we fetch more relevant posts.`,
                     totalCounts: {
                       retrieved: state.combinedResults.totalRetrievedCount,
                       generated: state.combinedResults.totalGeneratedCount,
@@ -336,11 +364,13 @@ export async function POST(req: Request) {
                       newForUser: state.combinedResults.totalNewLeadCountForUser,
                     },
                     emptyState: {
-                      isEmpty: interimLeads.length === 0,
+                      isEmpty: visibleInterimLeads.length === 0,
                       title:
-                        interimLeads.length === 0 ? "No retrieved leads yet" : "Retrieved leads ready",
+                        visibleInterimLeads.length === 0
+                          ? "No retrieved leads yet"
+                          : "Retrieved leads ready",
                       message:
-                        interimLeads.length === 0
+                        visibleInterimLeads.length === 0
                           ? "No high-quality retrieved leads yet."
                           : "Showing retrieved leads while fresh search continues.",
                     },
@@ -362,6 +392,33 @@ export async function POST(req: Request) {
           }
 
           const graphData = graphFromLangGraphInternals();
+          const finalResponse = state.finalResponse
+            ? {
+                ...state.finalResponse,
+                leads: filterHiddenLeadCards(
+                  state.finalResponse.leads,
+                  hiddenIdentityKeys,
+                  hiddenCanonicalUrls,
+                ),
+              }
+            : null;
+          if (searchRunId) {
+            const iterationsUsed = finalResponse?.iterationsUsed ?? state.iteration + 1;
+            const stopReason = finalResponse?.stopReason ?? state.stopReason;
+            await finalizeSearchRunRecord({
+              runId: searchRunId,
+              iterationCount: iterationsUsed,
+              stopReason,
+            });
+            if (finalResponse) {
+              await markFinalResponseLeadsAsShown({
+                userSessionId: session.userSessionId,
+                searchRunId,
+                iterationNumber: Math.max(0, iterationsUsed - 1),
+                finalLeads: finalResponse.leads,
+              });
+            }
+          }
           const payload = DebugRunOutputSchema.parse({
             graph: {
               nodes: graphData.nodes,
@@ -391,12 +448,17 @@ export async function POST(req: Request) {
               extractionResults: state.extractionResults ?? null,
               combinedResults: state.combinedResults ?? null,
               scoringResults: state.scoringResults ?? null,
-              finalResponse: state.finalResponse ?? null,
+              finalResponse,
             },
           });
           controller.enqueue(encoder.encode(line({ type: "final", payload })));
         });
       } catch (error) {
+        await finalizeSearchRunRecord({
+          runId: searchRunId,
+          iterationCount: 0,
+          stopReason: "max_iterations",
+        }).catch(() => {});
         const summarizedError = summarizeStreamRunError(error);
         logger.error("debug_run_stream_failed", {
           error: error instanceof Error ? error.message : "unknown",

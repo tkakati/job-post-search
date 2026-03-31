@@ -15,6 +15,28 @@ type LeadProvenanceRow = {
 
 export type LeadCardScope = "all" | "retrieval_only";
 
+type LeadScoreBreakdown = NonNullable<LeadCardViewModel["scoreBreakdown"]>;
+
+type LeadWithOptionalScoreBreakdown = LeadRecord & {
+  scoreBreakdown?: {
+    roleMatchScore?: number;
+    locationMatchScore?: number;
+    authorStrengthScore?: number;
+    hiringIntentScore?: number;
+    engagementScore?: number;
+    employmentTypeScore?: number;
+    baseScore?: number;
+    intentBoost?: number;
+    finalScore100?: number;
+    gatedToZero?: boolean;
+    gateReason?:
+      | "hiring_intent_zero"
+      | "employment_type_mismatch"
+      | "hard_location_mismatch"
+      | null;
+  };
+};
+
 function readTrimmedString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -53,6 +75,34 @@ function readExtractionRoleFromSourceMetadata(
   return readTrimmedString(extractionRaw.role);
 }
 
+function isLikelyRoleTitle(value: string | null | undefined): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.length < 3 || trimmed.length > 90) return false;
+  if (/\r|\n/.test(trimmed)) return false;
+  if (/https?:\/\//i.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    /\b(we('| a)?re hiring|looking for|apply now|dm me|comment below|job alert|open roles?)\b/.test(
+      lower,
+    )
+  ) {
+    return false;
+  }
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 14) return false;
+  const sentencePunctuationCount = (trimmed.match(/[.!?]/g) ?? []).length;
+  if (sentencePunctuationCount > 1) return false;
+  return true;
+}
+
+function readLikelyRoleTitle(value: string | null | undefined): string | null {
+  const normalized = readTrimmedString(value);
+  if (!normalized) return null;
+  return isLikelyRoleTitle(normalized) ? normalized : null;
+}
+
 function qualityBadgeForLead(lead: {
   leadScore?: number | null;
   hiringIntentScore?: number | null;
@@ -70,6 +120,74 @@ function sourceBadgeForProvenance(
     return "both";
   }
   return sources.includes("retrieval") ? "retrieved" : "fresh";
+}
+
+function normalizeGateReason(
+  value: unknown,
+): LeadScoreBreakdown["gateReason"] {
+  if (value === "hiring_intent_zero") return value;
+  if (value === "employment_type_mismatch") return value;
+  if (value === "hard_location_mismatch") return value;
+  return null;
+}
+
+function normalizeScoreBreakdown(
+  value: unknown,
+): LeadScoreBreakdown | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const breakdown = value as Record<string, unknown>;
+  const normalized: LeadScoreBreakdown = {};
+
+  if (typeof breakdown.roleMatchScore === "number" && Number.isFinite(breakdown.roleMatchScore)) {
+    normalized.roleMatchScore = breakdown.roleMatchScore;
+  }
+  if (
+    typeof breakdown.locationMatchScore === "number" &&
+    Number.isFinite(breakdown.locationMatchScore)
+  ) {
+    normalized.locationMatchScore = breakdown.locationMatchScore;
+  }
+  if (
+    typeof breakdown.authorStrengthScore === "number" &&
+    Number.isFinite(breakdown.authorStrengthScore)
+  ) {
+    normalized.authorStrengthScore = breakdown.authorStrengthScore;
+  }
+  if (
+    typeof breakdown.hiringIntentScore === "number" &&
+    Number.isFinite(breakdown.hiringIntentScore)
+  ) {
+    normalized.hiringIntentScore = breakdown.hiringIntentScore;
+  }
+  if (
+    typeof breakdown.engagementScore === "number" &&
+    Number.isFinite(breakdown.engagementScore)
+  ) {
+    normalized.engagementScore = breakdown.engagementScore;
+  }
+  if (
+    typeof breakdown.employmentTypeScore === "number" &&
+    Number.isFinite(breakdown.employmentTypeScore)
+  ) {
+    normalized.employmentTypeScore = breakdown.employmentTypeScore;
+  }
+  if (typeof breakdown.baseScore === "number" && Number.isFinite(breakdown.baseScore)) {
+    normalized.baseScore = breakdown.baseScore;
+  }
+  if (typeof breakdown.intentBoost === "number" && Number.isFinite(breakdown.intentBoost)) {
+    normalized.intentBoost = breakdown.intentBoost;
+  }
+  if (typeof breakdown.finalScore100 === "number" && Number.isFinite(breakdown.finalScore100)) {
+    normalized.finalScore100 = breakdown.finalScore100;
+  }
+  if (typeof breakdown.gatedToZero === "boolean") {
+    normalized.gatedToZero = breakdown.gatedToZero;
+  }
+  if ("gateReason" in breakdown) {
+    normalized.gateReason = normalizeGateReason(breakdown.gateReason);
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 export function buildLeadCardsFromLeads(input: {
@@ -170,12 +288,14 @@ export function buildLeadCardsFromLeads(input: {
   const limitedSelected = dedupedSelected.slice(0, input.maxLeads);
 
   return limitedSelected.map(({ lead, sources }) => {
+    const scoredLead = lead as LeadWithOptionalScoreBreakdown;
     const sourceBadge = sourceBadgeForProvenance(Array.from(sources));
     const provenance = provenanceByIdentity.get(lead.identityKey);
     const isNewForUser = provenance?.isNewForUser === true;
     const meta = lead.sourceMetadataJson as Record<string, unknown> | null | undefined;
-    const extractedRole = readExtractionRoleFromSourceMetadata(meta);
-    const displayJobTitle = extractedRole ?? readTrimmedString(lead.titleOrRole) ?? "Untitled role";
+    const extractedRole = readLikelyRoleTitle(readExtractionRoleFromSourceMetadata(meta));
+    const titleOrRole = readLikelyRoleTitle(lead.titleOrRole);
+    const displayJobTitle = extractedRole ?? titleOrRole ?? "Untitled role";
     const postContext = readPostContext(meta);
     const authorProfileUrlRaw =
       postContext?.primaryAuthorProfileUrl ??
@@ -199,6 +319,7 @@ export function buildLeadCardsFromLeads(input: {
       location: primaryLeadLocationText(lead),
       maxVisible: Number.POSITIVE_INFINITY,
     });
+    const scoreBreakdown = normalizeScoreBreakdown(scoredLead.scoreBreakdown);
 
     return {
       leadId: lead.id,
@@ -219,6 +340,7 @@ export function buildLeadCardsFromLeads(input: {
       jobTitle: displayJobTitle,
       jobLocation: locationDisplay.display,
       score: leadScore,
+      ...(scoreBreakdown ? { scoreBreakdown } : {}),
       freshness: sourceBadge,
       snippet: lead.snippet ?? null,
       sourceType: lead.sourceType,

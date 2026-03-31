@@ -43,6 +43,10 @@ export type LeadRecord = LeadIdentity & {
   fetchedAt?: string | null;
   roleEmbedding?: number[] | null;
   hiringIntentScore?: number | null;
+  /**
+   * @deprecated Runtime scoring is source-of-truth. Do not use persisted leadScore for ranking/UI.
+   * Kept temporarily for backward compatibility with older payloads.
+   */
   leadScore?: number | null;
   roleLocationKey: string;
   sourceMetadataJson?: Record<string, unknown> | null;
@@ -227,6 +231,13 @@ export type CombinedResultOutput = {
     maxIterations: number;
     shownHistoryCount: number;
     dedupedFromMergedCount: number;
+    retrievalLatencyMs?: number;
+    searchLatencyMs?: number;
+    combineTimeMs?: number;
+    totalIterationTimeMs?: number;
+    crossSourceRedundancyDroppedCount?: number;
+    countryMismatchDroppedCount?: number;
+    hiddenDroppedCount?: number;
   };
 };
 
@@ -300,6 +311,7 @@ export type QueryPerformanceSummary = {
 
 export type LeadCardViewModel = {
   leadId?: number;
+  identityKey?: string | null;
   title: string;
   company?: string | null;
   location?: string | null;
@@ -317,12 +329,32 @@ export type LeadCardViewModel = {
   jobTitle?: string;
   jobLocation?: string | null;
   score?: number | null;
+  scoreBreakdown?: {
+    roleMatchScore?: number;
+    locationMatchScore?: number;
+    authorStrengthScore?: number;
+    hiringIntentScore?: number;
+    engagementScore?: number;
+    employmentTypeScore?: number;
+    baseScore?: number;
+    intentBoost?: number;
+    finalScore100?: number;
+    gatedToZero?: boolean;
+    gateReason?:
+      | "hiring_intent_zero"
+      | "employment_type_mismatch"
+      | "hard_location_mismatch"
+      | null;
+  };
   freshness?: "retrieved" | "fresh" | "both";
+  workMode?: "onsite" | "hybrid" | "remote" | null;
+  employmentType?: "full-time" | "part-time" | "contract" | "internship" | null;
   provenanceSources: Array<"retrieval" | "fresh_search">;
   postedAt?: string | null;
   isNewForUser: boolean;
   newBadge?: "new";
   qualityBadge?: "high" | "medium" | "low" | "unscored";
+  sourceMetadataJson?: Record<string, unknown> | null;
 };
 
 export type AgentState = {

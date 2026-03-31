@@ -10,6 +10,8 @@ export type RunAgentInput = UserInput & {
   maxIterations?: number;
   targetHighQualityLeads?: number;
   shownLeadIdentityKeys?: string[];
+  hiddenLeadIdentityKeys?: string[];
+  hiddenLeadCanonicalUrls?: string[];
 };
 
 function recursionLimitForMaxIterations(maxIterations: number) {
@@ -33,6 +35,8 @@ export async function runAgent(input: RunAgentInput) {
     maxIterations: input.maxIterations ?? 2,
     targetHighQualityLeads: input.targetHighQualityLeads ?? 20,
     shownLeadIdentityKeys: input.shownLeadIdentityKeys ?? [],
+    hiddenLeadIdentityKeys: input.hiddenLeadIdentityKeys ?? [],
+    hiddenLeadCanonicalUrls: input.hiddenLeadCanonicalUrls ?? [],
   });
 
   const graph = createAgentGraph();

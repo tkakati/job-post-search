@@ -18,10 +18,7 @@ export async function finalResponseGenerationNode(state: AgentGraphState) {
       ? "retrieval_only_finalization"
       : "adaptive_exploration";
   const scoredRankedLeads = state.scoringResults?.rankedLeads ?? [];
-  const selected =
-    scoredRankedLeads.length > 0
-      ? scoredRankedLeads
-      : (combined?.newLeadsForUser ?? []);
+  const selected = scoredRankedLeads;
   const leadCards = buildLeadCardsFromLeads({
     selectedLeads: selected,
     leadProvenance: combined?.leadProvenance ?? [],

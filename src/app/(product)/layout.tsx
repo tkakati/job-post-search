@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { ProductHeader } from "@/app/(product)/product-header";
+import { ProductAuthOverlay } from "@/app/(product)/product-auth-overlay";
 import { ProductViewModeProvider } from "@/app/(product)/view-mode-context";
 
 export default function ProductLayout({
@@ -10,6 +11,7 @@ export default function ProductLayout({
   return (
     <ProductViewModeProvider>
       <div className="min-h-screen bg-background text-foreground">
+        <ProductAuthOverlay />
         <Suspense fallback={<div className="h-[72px] w-full" aria-hidden />}>
           <ProductHeader />
         </Suspense>

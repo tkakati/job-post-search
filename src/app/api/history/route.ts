@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { ensureAnonymousSession } from "@/lib/api/session";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { getRecentHistory } from "@/lib/api/search-runs";
 import { HistoryQuerySchema, HistoryResponseSchema } from "@/lib/schemas/api";
 import { apiError, apiOk } from "@/lib/api/response";
@@ -24,9 +24,13 @@ export async function GET(req: Request) {
     }
 
     const cookieStore = await cookies();
-    const userSessionId = await ensureAnonymousSession(cookieStore);
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
     const history = await getRecentHistory({
-      userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
       limit: parsed.data.limit,
     });
     return apiOk(HistoryResponseSchema.parse(history));
@@ -41,4 +45,3 @@ export async function GET(req: Request) {
     });
   }
 }
-

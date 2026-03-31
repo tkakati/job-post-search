@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useAuth } from "@clerk/nextjs";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -94,6 +95,19 @@ type FinalLeadCard = {
   jobTitle?: string;
   jobLocation?: string | null;
   score?: number | null;
+  scoreBreakdown?: {
+    roleMatchScore?: number;
+    locationMatchScore?: number;
+    authorStrengthScore?: number;
+    hiringIntentScore?: number;
+    engagementScore?: number;
+    employmentTypeScore?: number;
+    baseScore?: number;
+    intentBoost?: number;
+    finalScore100?: number;
+    gatedToZero?: boolean;
+    gateReason?: string | null;
+  } | null;
   freshness?: "retrieved" | "fresh" | "both";
   snippet?: string | null;
   sourceBadge?: "retrieved" | "fresh" | "both";
@@ -156,12 +170,18 @@ type JobPostAuthorProfile = {
 type PostFeedRow = {
   key: string;
   lead: FinalLeadCard;
+  mergeKey: string | null;
+  runContextLabel: string | null;
+  showRunContextBadge: boolean;
+  leadIdentityKey: string | null;
+  canonicalUrlKey: string | null;
   displayRoleTitle: string;
   displayPostAuthor: string | null;
   displayPostAuthorUrl: string | null;
   authorProfile: JobPostAuthorProfile | undefined;
   freshness: "retrieved" | "fresh" | "both";
   sourceSignal: "retrieved" | "fresh" | "both" | null;
+  resolvedWorkMode: "onsite" | "hybrid" | "remote" | null;
   authorTypeLabel: AuthorTypeLabel;
   locationDisplay: ReturnType<typeof formatLeadLocationDisplay>;
   score: number | null;
@@ -188,6 +208,16 @@ type PostFeedRow = {
   isCompanyLowConfidence: boolean;
   companyFallbackBlockedByCountryMismatch: boolean;
   isPostedByCompany: boolean;
+};
+
+type SavedFeedItem = {
+  lead: FinalLeadCard;
+  runContext: {
+    role: string;
+    location: string;
+    searchRunId: number | null;
+    shownAt: string;
+  };
 };
 
 type DebugTabMode = "agent" | "post-feed";
@@ -226,19 +256,6 @@ type PostFeedFilterState = {
   status: PostFeedStatusFilter;
   newOnly: PostFeedNewOnlyFilter;
 };
-
-function inferFreshnessFromSourceMetadata(value: unknown): "retrieved" | "fresh" | "both" | null {
-  if (!value || typeof value !== "object") return null;
-  const provenanceSources = (value as Record<string, unknown>).provenanceSources;
-  if (!Array.isArray(provenanceSources)) return null;
-
-  const hasRetrieved = provenanceSources.includes("retrieval");
-  const hasFresh = provenanceSources.includes("fresh_search");
-  if (hasRetrieved && hasFresh) return "both";
-  if (hasRetrieved) return "retrieved";
-  if (hasFresh) return "fresh";
-  return null;
-}
 
 function normalizeStringList(value: unknown): string[] {
   if (typeof value === "string") {
@@ -313,6 +330,34 @@ function readExtractionRoleFromSourceMetadata(
   return readIdentityKey(extractionRaw.role);
 }
 
+function isLikelyRoleTitle(value: string | null | undefined): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.length < 3 || trimmed.length > 90) return false;
+  if (/\r|\n/.test(trimmed)) return false;
+  if (/https?:\/\//i.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    /\b(we('| a)?re hiring|looking for|apply now|dm me|comment below|job alert|open roles?)\b/.test(
+      lower,
+    )
+  ) {
+    return false;
+  }
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 14) return false;
+  const sentencePunctuationCount = (trimmed.match(/[.!?]/g) ?? []).length;
+  if (sentencePunctuationCount > 1) return false;
+  return true;
+}
+
+function readLikelyRoleTitle(value: unknown): string | null {
+  const normalized = readIdentityKey(value);
+  if (!normalized) return null;
+  return isLikelyRoleTitle(normalized) ? normalized : null;
+}
+
 function resolveDisplayRoleTitle(input: {
   lead: FinalLeadCard;
   rankedLead?: {
@@ -320,21 +365,23 @@ function resolveDisplayRoleTitle(input: {
     sourceMetadataJson?: Record<string, unknown> | null;
   } | null;
 }): string {
-  const extractionRole = readExtractionRoleFromSourceMetadata(input.lead.sourceMetadataJson ?? null);
+  const extractionRole = readLikelyRoleTitle(
+    readExtractionRoleFromSourceMetadata(input.lead.sourceMetadataJson ?? null),
+  );
   if (extractionRole) return extractionRole;
 
-  const leadJobTitle = readIdentityKey(input.lead.jobTitle);
+  const leadJobTitle = readLikelyRoleTitle(input.lead.jobTitle);
   if (leadJobTitle) return leadJobTitle;
 
-  const leadTitle = readIdentityKey(input.lead.title);
+  const leadTitle = readLikelyRoleTitle(input.lead.title);
   if (leadTitle) return leadTitle;
 
-  const rankedExtractionRole = readExtractionRoleFromSourceMetadata(
-    input.rankedLead?.sourceMetadataJson ?? null,
+  const rankedExtractionRole = readLikelyRoleTitle(
+    readExtractionRoleFromSourceMetadata(input.rankedLead?.sourceMetadataJson ?? null),
   );
   if (rankedExtractionRole) return rankedExtractionRole;
 
-  const rankedTitle = readIdentityKey(input.rankedLead?.titleOrRole ?? null);
+  const rankedTitle = readLikelyRoleTitle(input.rankedLead?.titleOrRole ?? null);
   if (rankedTitle) return rankedTitle;
 
   return "Untitled role";
@@ -358,14 +405,6 @@ function normalizeUrlForLookup(value: string): string {
   } catch {
     return value.trim().toLowerCase();
   }
-}
-
-function normalizeSearchContextKey(
-  role: string,
-  location: string,
-  recencyPreference: "past-24h" | "past-week" | "past-month",
-): string {
-  return `${normalizeLowerText(role)}::${normalizeLowerText(location)}::${recencyPreference}`;
 }
 
 function resolveLeadMergeKey(lead: FinalLeadCard): string | null {
@@ -449,22 +488,133 @@ function extractMergeKeysFromLeads(leads: FinalLeadCard[]): Set<string> {
   return keys;
 }
 
+function extractRoleFromLeadForMerge(lead: FinalLeadCard): string | null {
+  const sourceMetadata =
+    lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
+      ? (lead.sourceMetadataJson as Record<string, unknown>)
+      : null;
+  const extractionRaw =
+    sourceMetadata?.extraction && typeof sourceMetadata.extraction === "object"
+      ? (sourceMetadata.extraction as Record<string, unknown>)
+      : null;
+
+  const extractedRole = readLikelyRoleTitle(extractionRaw?.role);
+  if (extractedRole) return extractedRole;
+  const jobTitle = readLikelyRoleTitle(lead.jobTitle);
+  if (jobTitle) return jobTitle;
+  const title = readLikelyRoleTitle(lead.title);
+  if (title) return title;
+  return null;
+}
+
+function resolveLeadScoreForMerge(lead: FinalLeadCard): number | null {
+  if (typeof lead.score === "number" && Number.isFinite(lead.score)) {
+    return Math.round(Math.max(0, Math.min(1, lead.score)) * 100);
+  }
+  const breakdown =
+    lead.scoreBreakdown && typeof lead.scoreBreakdown === "object"
+      ? lead.scoreBreakdown
+      : null;
+  if (typeof breakdown?.finalScore100 === "number" && Number.isFinite(breakdown.finalScore100)) {
+    return Math.max(0, Math.min(100, breakdown.finalScore100));
+  }
+  return null;
+}
+
+function resolveLeadStaticCompletenessForMerge(lead: FinalLeadCard): number {
+  let score = 0;
+  if (readIdentityKey(lead.company)) score += 1;
+  if (readIdentityKey(lead.rawLocationText) || readIdentityKey(lead.location)) score += 1;
+  if (Array.isArray(lead.locations) && lead.locations.length > 0) score += 1;
+  if (lead.workMode === "onsite" || lead.workMode === "hybrid" || lead.workMode === "remote") {
+    score += 1;
+  }
+  if (
+    lead.employmentType === "full-time" ||
+    lead.employmentType === "part-time" ||
+    lead.employmentType === "contract" ||
+    lead.employmentType === "internship"
+  ) {
+    score += 1;
+  }
+  if (readIdentityKey(lead.postAuthor)) score += 1;
+  return score;
+}
+
+function resolveLeadRichnessForMerge(lead: FinalLeadCard): number {
+  let score = 0;
+  const leadScore = resolveLeadScoreForMerge(lead);
+  if (leadScore != null) score += 1000 + leadScore * 3;
+  if (extractRoleFromLeadForMerge(lead)) score += 120;
+  if (typeof lead.snippet === "string" && lead.snippet.trim()) score += 12;
+  const sourceMetadata =
+    lead.sourceMetadataJson && typeof lead.sourceMetadataJson === "object"
+      ? (lead.sourceMetadataJson as Record<string, unknown>)
+      : null;
+  if (sourceMetadata) {
+    score += 15;
+    if (typeof sourceMetadata.fullText === "string" && sourceMetadata.fullText.trim()) score += 8;
+    if (typeof sourceMetadata.authorProfileUrl === "string" && sourceMetadata.authorProfileUrl.trim()) {
+      score += 6;
+    }
+  }
+  if (typeof lead.postedAt === "string" && lead.postedAt.trim()) score += 4;
+  score += resolveLeadStaticCompletenessForMerge(lead) * 18;
+  return score;
+}
+
+function shouldReplaceMergedLead(existing: FinalLeadCard, incoming: FinalLeadCard): boolean {
+  const existingScore = resolveLeadScoreForMerge(existing);
+  const incomingScore = resolveLeadScoreForMerge(incoming);
+  if (incomingScore != null && existingScore == null) return true;
+  if (incomingScore != null && existingScore != null && incomingScore > existingScore) return true;
+
+  const existingRole = extractRoleFromLeadForMerge(existing);
+  const incomingRole = extractRoleFromLeadForMerge(incoming);
+  if (incomingRole && !existingRole) return true;
+
+  const existingStatic = resolveLeadStaticCompletenessForMerge(existing);
+  const incomingStatic = resolveLeadStaticCompletenessForMerge(incoming);
+  if (incomingStatic > existingStatic) return true;
+
+  return resolveLeadRichnessForMerge(incoming) > resolveLeadRichnessForMerge(existing);
+}
+
 function mergeNetNewLeads(
   existing: FinalLeadCard[],
   incoming: FinalLeadCard[],
-): { merged: FinalLeadCard[]; addedCount: number; addedKeys: string[] } {
+): { merged: FinalLeadCard[]; addedCount: number; addedKeys: string[]; updatedCount: number } {
   const normalizedExisting = dedupeFinalLeadCardsByRedundancy(existing).deduped;
-  if (incoming.length === 0) return { merged: normalizedExisting, addedCount: 0, addedKeys: [] };
+  if (incoming.length === 0) {
+    return { merged: normalizedExisting, addedCount: 0, addedKeys: [], updatedCount: 0 };
+  }
 
   const merged = [...normalizedExisting];
   const existingKeys = extractMergeKeysFromLeads(normalizedExisting);
-  const seenKeys = new Set(existingKeys);
+  const indexByMergeKey = new Map<string, number>();
+  for (const [index, lead] of merged.entries()) {
+    const mergeKey = resolveLeadMergeKey(lead);
+    if (mergeKey && !indexByMergeKey.has(mergeKey)) {
+      indexByMergeKey.set(mergeKey, index);
+    }
+  }
+  let updatedCount = 0;
 
   for (const lead of incoming) {
     const mergeKey = resolveLeadMergeKey(lead);
-    if (mergeKey && seenKeys.has(mergeKey)) continue;
+    if (mergeKey && indexByMergeKey.has(mergeKey)) {
+      const existingIndex = indexByMergeKey.get(mergeKey);
+      if (existingIndex != null) {
+        const existingLead = merged[existingIndex];
+        if (existingLead && shouldReplaceMergedLead(existingLead, lead)) {
+          merged[existingIndex] = lead;
+          updatedCount += 1;
+        }
+      }
+      continue;
+    }
     merged.push(lead);
-    if (mergeKey) seenKeys.add(mergeKey);
+    if (mergeKey) indexByMergeKey.set(mergeKey, merged.length - 1);
   }
 
   const mergedAfterRedundancy = dedupeFinalLeadCardsByRedundancy(merged).deduped;
@@ -472,7 +622,7 @@ function mergeNetNewLeads(
   const mergedKeys = extractMergeKeysFromLeads(mergedAfterRedundancy);
   const addedKeys = Array.from(mergedKeys).filter((key) => !existingKeys.has(key));
 
-  return { merged: mergedAfterRedundancy, addedCount, addedKeys };
+  return { merged: mergedAfterRedundancy, addedCount, addedKeys, updatedCount };
 }
 
 const AGENT_APIFY_MAX_ITEMS_PER_CALL = 10;
@@ -480,8 +630,13 @@ const AGENT_APIFY_MAX_PAYLOAD_ATTEMPTS_PER_QUERY = 1;
 const POST_FEED_INITIAL_COUNT = 20;
 const POST_FEED_LOAD_MORE_COUNT = 20;
 const POST_FEED_STATUS_STORAGE_KEY = "job-post-discovery.post-feed-status.v1";
+const DELETE_CONFIRM_PREFERENCE_KEY_PREFIX = "post-feed:skip-delete-confirm";
 const RUNNING_FEED_STATUS_WITH_RESULTS_COPY =
   "Showing retrieved matches from database while we find more posts… ETA ~2 min";
+const RUNNING_FEED_STATUS_FRESH_ONLY_COPY =
+  "Showing fresh matches while we find more posts… ETA ~2 min";
+const RUNNING_FEED_STATUS_MIXED_COPY =
+  "Showing retrieved and fresh matches while we find more posts… ETA ~2 min";
 const RUNNING_FEED_STATUS_EMPTY_COPY =
   "We are working on finding you relevant posts… ETA ~2 min";
 
@@ -596,7 +751,45 @@ function recencyToWindowMs(recency: PostFeedRecencyFilter): number | null {
   return null;
 }
 
-export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
+export function DebugTabClient({
+  mode = "agent",
+  initialSavedFeedItems = [],
+}: {
+  mode?: DebugTabMode;
+  initialSavedFeedItems?: SavedFeedItem[];
+}) {
+  const { userId, isLoaded } = useAuth();
+  const initialSavedFeedSnapshot = React.useMemo(() => {
+    const incomingLeads = initialSavedFeedItems
+      .map((item) => item?.lead)
+      .filter(
+        (lead): lead is FinalLeadCard =>
+          Boolean(lead && typeof lead === "object" && typeof lead.canonicalUrl === "string"),
+      );
+    const deduped = dedupeFinalLeadCardsByRedundancy(incomingLeads).deduped;
+    const contextByKey: Record<
+      string,
+      {
+        role: string;
+        location: string;
+        searchRunId: number | null;
+        shownAt: string;
+      }
+    > = {};
+    for (const item of initialSavedFeedItems) {
+      const lead = item?.lead;
+      if (!lead) continue;
+      const mergeKey = resolveLeadMergeKey(lead);
+      if (!mergeKey) continue;
+      contextByKey[mergeKey] = {
+        role: item.runContext.role,
+        location: item.runContext.location,
+        searchRunId: item.runContext.searchRunId,
+        shownAt: item.runContext.shownAt,
+      };
+    }
+    return { deduped, contextByKey };
+  }, [initialSavedFeedItems]);
   const [role, setRole] = React.useState("Product Manager");
   const [location, setLocation] = React.useState("Seattle");
   const [locationIsHardFilter, setLocationIsHardFilter] = React.useState(true);
@@ -632,10 +825,38 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   const [isAdvancedFiltersOpen, setIsAdvancedFiltersOpen] = React.useState(false);
   const [postFeedSortMode, setPostFeedSortMode] = React.useState<PostFeedSortMode>("best_match");
   const [postFeedVisibleCount, setPostFeedVisibleCount] = React.useState(POST_FEED_INITIAL_COUNT);
-  const [stickyFeedLeads, setStickyFeedLeads] = React.useState<FinalLeadCard[]>([]);
-  const [activeSearchKey, setActiveSearchKey] = React.useState<string>("");
+  const [stickyFeedLeads, setStickyFeedLeads] = React.useState<FinalLeadCard[]>(
+    () => initialSavedFeedSnapshot.deduped,
+  );
+  const [feedRunContextByMergeKey, setFeedRunContextByMergeKey] = React.useState<
+    Record<
+      string,
+      {
+        role: string;
+        location: string;
+        searchRunId: number | null;
+        shownAt: string;
+      }
+    >
+  >(() => initialSavedFeedSnapshot.contextByKey);
+  const [locallyHiddenMergeKeys, setLocallyHiddenMergeKeys] = React.useState<Record<string, true>>(
+    {},
+  );
+  const [locallyHiddenIdentityKeys, setLocallyHiddenIdentityKeys] = React.useState<
+    Record<string, true>
+  >({});
+  const [locallyHiddenCanonicalUrls, setLocallyHiddenCanonicalUrls] = React.useState<
+    Record<string, true>
+  >({});
+  const [deletingFeedRowKeys, setDeletingFeedRowKeys] = React.useState<Record<string, true>>({});
+  const [pendingDeleteRow, setPendingDeleteRow] = React.useState<PostFeedRow | null>(null);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = React.useState(false);
+  const [skipDeleteConfirm, setSkipDeleteConfirm] = React.useState(false);
+  const [rememberSkipDeleteConfirm, setRememberSkipDeleteConfirm] = React.useState(false);
   const [lastRunNewLeadCount, setLastRunNewLeadCount] = React.useState<number | null>(null);
-  const [runStartedWithExistingFeed, setRunStartedWithExistingFeed] = React.useState(false);
+  const [runStartedWithExistingFeed, setRunStartedWithExistingFeed] = React.useState(
+    initialSavedFeedSnapshot.deduped.length > 0,
+  );
   const [runNewLeadKeys, setRunNewLeadKeys] = React.useState<Record<string, true>>({});
   const [postFeedStatuses, setPostFeedStatuses] = React.useState<Record<string, PostReviewStatus>>(
     {},
@@ -684,11 +905,25 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   const [runErrorSummary, setRunErrorSummary] = React.useState<string | null>(null);
   const graphSectionRef = React.useRef<HTMLDivElement | null>(null);
   const postFeedSectionRef = React.useRef<HTMLDivElement | null>(null);
-  const runSearchKeyRef = React.useRef<string>("");
-  const runBaseStickyCountRef = React.useRef<number>(0);
-  const runStartedWithExistingFeedRef = React.useRef<boolean>(false);
+  const runStartedWithExistingFeedRef = React.useRef<boolean>(
+    initialSavedFeedSnapshot.deduped.length > 0,
+  );
+  const stickyFeedCountRef = React.useRef<number>(initialSavedFeedSnapshot.deduped.length);
   const runAccumulatedAddedCountRef = React.useRef<number>(0);
+  const currentRunContextRef = React.useRef<{
+    role: string;
+    location: string;
+    searchRunId: number | null;
+    shownAt: string;
+  } | null>(null);
   const resumeInputRef = React.useRef<HTMLInputElement | null>(null);
+  const deleteConfirmPreferenceKey = React.useMemo(
+    () =>
+      userId
+        ? `${DELETE_CONFIRM_PREFERENCE_KEY_PREFIX}:clerk:${userId}`
+        : `${DELETE_CONFIRM_PREFERENCE_KEY_PREFIX}:guest`,
+    [userId],
+  );
 
   React.useEffect(() => {
     if (isRunning || lastRunNewLeadCount == null) return;
@@ -714,6 +949,19 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       // Ignore malformed localStorage payloads.
     }
   }, []);
+
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(deleteConfirmPreferenceKey);
+      setSkipDeleteConfirm(raw === "1");
+    } catch {
+      setSkipDeleteConfirm(false);
+    }
+  }, [deleteConfirmPreferenceKey]);
+
+  React.useEffect(() => {
+    stickyFeedCountRef.current = stickyFeedLeads.length;
+  }, [stickyFeedLeads.length]);
 
   const setPostFeedStatus = React.useCallback(
     (statusStorageKey: string, nextStatus: PostReviewStatus) => {
@@ -811,6 +1059,130 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     },
     [],
   );
+
+  const isLeadLocallyHidden = React.useCallback(
+    (lead: FinalLeadCard) => {
+      const mergeKey = resolveLeadMergeKey(lead);
+      if (mergeKey && locallyHiddenMergeKeys[mergeKey]) return true;
+      const identityKey = readIdentityKey(lead.identityKey)?.toLowerCase();
+      if (identityKey && locallyHiddenIdentityKeys[identityKey]) return true;
+      const canonicalKey = normalizeUrlForLookup(lead.canonicalUrl);
+      if (canonicalKey && locallyHiddenCanonicalUrls[canonicalKey]) return true;
+      const postUrlKey = lead.postUrl ? normalizeUrlForLookup(lead.postUrl) : null;
+      if (postUrlKey && locallyHiddenCanonicalUrls[postUrlKey]) return true;
+      return false;
+    },
+    [locallyHiddenCanonicalUrls, locallyHiddenIdentityKeys, locallyHiddenMergeKeys],
+  );
+
+  const applyRunContextForIncomingLeads = React.useCallback((incomingLeads: FinalLeadCard[]) => {
+    const runContext = currentRunContextRef.current;
+    if (!runContext) return;
+    const mergeKeys = incomingLeads
+      .map((lead) => resolveLeadMergeKey(lead))
+      .filter((value): value is string => Boolean(value));
+    if (mergeKeys.length === 0) return;
+    setFeedRunContextByMergeKey((prev) => {
+      const next = { ...prev };
+      for (const mergeKey of mergeKeys) {
+        next[mergeKey] = runContext;
+      }
+      return next;
+    });
+  }, []);
+
+  const hasLoadedSavedFeedRef = React.useRef<boolean>(initialSavedFeedItems.length > 0);
+  const lastAuthKeyRef = React.useRef<string | null>(null);
+
+  const loadSavedFeed = React.useCallback(async (options?: {
+    force?: boolean;
+    authKey?: string;
+    reason?: string;
+  }): Promise<FinalLeadCard[] | null> => {
+    if (!options?.force && hasLoadedSavedFeedRef.current) return null;
+    try {
+      const response = await fetch("/api/post-feed/saved", {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const rawText = await response.text();
+      let payload:
+        | { ok: true; data: { items?: SavedFeedItem[] } }
+        | { ok: false; error?: { message?: string } }
+        | null = null;
+      try {
+        payload = JSON.parse(rawText) as
+          | { ok: true; data: { items?: SavedFeedItem[] } }
+          | { ok: false; error?: { message?: string } };
+      } catch {
+        payload = null;
+      }
+      if (!response.ok || !payload || !("ok" in payload) || !payload.ok) return null;
+      const items = Array.isArray(payload.data?.items) ? payload.data.items : [];
+      const stickyCountBefore = stickyFeedCountRef.current;
+
+      const incomingLeads = items
+        .map((item) => item?.lead)
+        .filter(
+          (lead): lead is FinalLeadCard =>
+            Boolean(lead && typeof lead === "object" && typeof lead.canonicalUrl === "string"),
+        );
+      const dedupedIncoming = dedupeFinalLeadCardsByRedundancy(incomingLeads).deduped;
+      setStickyFeedLeads(dedupedIncoming);
+      setRunStartedWithExistingFeed(dedupedIncoming.length > 0);
+      runStartedWithExistingFeedRef.current = dedupedIncoming.length > 0;
+
+      const contextByKey: Record<
+        string,
+        {
+          role: string;
+          location: string;
+          searchRunId: number | null;
+          shownAt: string;
+        }
+      > = {};
+      for (const item of items) {
+        const lead = item?.lead;
+        if (!lead) continue;
+        const mergeKey = resolveLeadMergeKey(lead);
+        if (!mergeKey) continue;
+        contextByKey[mergeKey] = {
+          role: item.runContext.role,
+          location: item.runContext.location,
+          searchRunId: item.runContext.searchRunId,
+          shownAt: item.runContext.shownAt,
+        };
+      }
+      setFeedRunContextByMergeKey(contextByKey);
+      hasLoadedSavedFeedRef.current = true;
+      console.info("saved_feed_bootstrap", {
+        reason: options?.reason ?? "unknown",
+        auth_key: options?.authKey ?? (userId ?? "guest"),
+        saved_items_count: items.length,
+        sticky_count_before: stickyCountBefore,
+        sticky_count_after: dedupedIncoming.length,
+      });
+      return dedupedIncoming;
+    } catch {
+      // Ignore saved-feed bootstrap failures to keep the run UI usable.
+      return null;
+    }
+  }, [userId]);
+
+  React.useEffect(() => {
+    if (initialSavedFeedItems.length > 0) return;
+    void loadSavedFeed({ reason: "initial_bootstrap", authKey: userId ?? "guest" });
+  }, [initialSavedFeedItems.length, loadSavedFeed]);
+
+  React.useEffect(() => {
+    if (!isLoaded) return;
+    const authKey = userId ?? "guest";
+    const isFirstAuthCheck = lastAuthKeyRef.current === null;
+    lastAuthKeyRef.current = authKey;
+    if (isFirstAuthCheck && initialSavedFeedItems.length > 0) return;
+    void loadSavedFeed({ force: true, authKey, reason: "auth_change" });
+  }, [isLoaded, userId, initialSavedFeedItems.length, loadSavedFeed]);
 
   const groupedNodeLogs = React.useMemo(() => {
     const map = new Map<
@@ -959,10 +1331,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     return Array.isArray(maybeFinal?.leads) ? maybeFinal.leads : [];
   }, [result, interimFinalResponse]);
 
-  const postFeedLeads = React.useMemo(
-    () => (stickyFeedLeads.length > 0 ? stickyFeedLeads : finalLeads),
-    [stickyFeedLeads, finalLeads],
-  );
+  const postFeedLeads = React.useMemo(() => {
+    const baseLeads = stickyFeedLeads.length > 0 ? stickyFeedLeads : finalLeads;
+    return baseLeads.filter((lead) => !isLeadLocallyHidden(lead));
+  }, [finalLeads, isLeadLocallyHidden, stickyFeedLeads]);
 
   const plannerDecisionSnapshot = React.useMemo(() => {
     const plannerOutput = result?.snapshots?.plannerOutput as
@@ -1922,10 +2294,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         rankedLead: options?.rankedLead ?? null,
       });
       const postContext = resolvePostContextFromSourceMetadata(sourceMetadata);
+      const extraction =
+        sourceMetadata?.extraction && typeof sourceMetadata.extraction === "object"
+          ? (sourceMetadata.extraction as Record<string, unknown>)
+          : null;
       const sourceSignal =
         lead.freshness ??
         lead.sourceBadge ??
-        inferFreshnessFromSourceMetadata(sourceMetadata) ??
         null;
       const freshness = sourceSignal ?? "fresh";
       const preferredLocations =
@@ -1939,6 +2314,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         (typeof scoredLead?.rawLocationText === "string" && scoredLead.rawLocationText.trim()
           ? scoredLead.rawLocationText.trim()
           : null) ??
+        (typeof extraction?.location === "string" && extraction.location.trim()
+          ? extraction.location.trim()
+          : null) ??
         (typeof lead.location === "string" && lead.location.trim() ? lead.location.trim() : null) ??
         (typeof lead.jobLocation === "string" && lead.jobLocation.trim()
           ? lead.jobLocation.trim()
@@ -1950,8 +2328,19 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       const locationDisplay = formatLocations(
         {
           locations: preferredLocations,
-          rawLocationText: lead.rawLocationText ?? scoredLead?.rawLocationText ?? null,
-          location: inferredAuthorLocation ?? lead.location ?? lead.jobLocation ?? null,
+          rawLocationText:
+            lead.rawLocationText ??
+            scoredLead?.rawLocationText ??
+            (typeof extraction?.location === "string" && extraction.location.trim()
+              ? extraction.location.trim()
+              : null),
+          location:
+            inferredAuthorLocation ??
+            lead.location ??
+            lead.jobLocation ??
+            (typeof extraction?.location === "string" && extraction.location.trim()
+              ? extraction.location.trim()
+              : null),
         },
         {
           maxVisible: Number.POSITIVE_INFINITY,
@@ -1960,10 +2349,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       const isLocationLowConfidence = Boolean(
         inferredAuthorLocation && locationDisplay.parsedLocations.length > 0,
       );
-      const extraction =
-        sourceMetadata?.extraction && typeof sourceMetadata.extraction === "object"
-          ? (sourceMetadata.extraction as Record<string, unknown>)
+      const extractionWorkMode =
+        extraction?.workMode === "onsite" ||
+        extraction?.workMode === "hybrid" ||
+        extraction?.workMode === "remote"
+          ? extraction.workMode
           : null;
+      const resolvedWorkMode = lead.workMode ?? extractionWorkMode;
       const extractedCompany = resolveExtractedCompany({
         leadCompany: lead.company ?? null,
         extractionCompany: typeof extraction?.company === "string" ? extraction.company : null,
@@ -1984,23 +2376,33 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         typeof options?.rankedScore === "number"
           ? options.rankedScore
           : (scoredLead?.leadScore ?? (typeof lead.score === "number" ? lead.score : null));
+      const leadScoreBreakdown =
+        lead.scoreBreakdown && typeof lead.scoreBreakdown === "object"
+          ? lead.scoreBreakdown
+          : null;
       const roleMatchScore =
         typeof options?.rankedBreakdown?.roleMatchScore === "number"
           ? options.rankedBreakdown.roleMatchScore
           : typeof scoredLead?.roleMatchScore === "number"
             ? scoredLead.roleMatchScore
+            : typeof leadScoreBreakdown?.roleMatchScore === "number"
+              ? leadScoreBreakdown.roleMatchScore
             : null;
       const locationMatchScore =
         typeof options?.rankedBreakdown?.locationMatchScore === "number"
           ? options.rankedBreakdown.locationMatchScore
           : typeof scoredLead?.locationMatchScore === "number"
             ? scoredLead.locationMatchScore
+            : typeof leadScoreBreakdown?.locationMatchScore === "number"
+              ? leadScoreBreakdown.locationMatchScore
             : null;
       const authorStrengthScore =
         typeof options?.rankedBreakdown?.authorStrengthScore === "number"
           ? options.rankedBreakdown.authorStrengthScore
           : typeof scoredLead?.authorStrengthScore === "number"
             ? scoredLead.authorStrengthScore
+            : typeof leadScoreBreakdown?.authorStrengthScore === "number"
+              ? leadScoreBreakdown.authorStrengthScore
             : null;
       const hiringIntentScore =
         typeof options?.rankedBreakdown?.hiringIntentScore === "number"
@@ -2009,39 +2411,53 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
             ? options.rankedBreakdown.engagementScore
             : typeof scoredLead?.hiringIntentScore === "number"
               ? scoredLead.hiringIntentScore
+              : typeof leadScoreBreakdown?.hiringIntentScore === "number"
+                ? leadScoreBreakdown.hiringIntentScore
+                : typeof leadScoreBreakdown?.engagementScore === "number"
+                  ? leadScoreBreakdown.engagementScore
               : null;
       const employmentTypeScore =
         typeof options?.rankedBreakdown?.employmentTypeScore === "number"
           ? options.rankedBreakdown.employmentTypeScore
           : typeof scoredLead?.employmentTypeScore === "number"
             ? scoredLead.employmentTypeScore
+            : typeof leadScoreBreakdown?.employmentTypeScore === "number"
+              ? leadScoreBreakdown.employmentTypeScore
             : null;
       const baseScore =
         typeof options?.rankedBreakdown?.baseScore === "number"
           ? options.rankedBreakdown.baseScore
           : typeof scoredLead?.baseScore === "number"
             ? scoredLead.baseScore
+            : typeof leadScoreBreakdown?.baseScore === "number"
+              ? leadScoreBreakdown.baseScore
             : null;
       const intentBoost =
         typeof options?.rankedBreakdown?.intentBoost === "number"
           ? options.rankedBreakdown.intentBoost
           : typeof scoredLead?.intentBoost === "number"
             ? scoredLead.intentBoost
+            : typeof leadScoreBreakdown?.intentBoost === "number"
+              ? leadScoreBreakdown.intentBoost
             : null;
       const finalScore100 =
         typeof options?.rankedBreakdown?.finalScore100 === "number"
           ? options.rankedBreakdown.finalScore100
           : typeof scoredLead?.finalScore100 === "number"
             ? scoredLead.finalScore100
+            : typeof leadScoreBreakdown?.finalScore100 === "number"
+              ? leadScoreBreakdown.finalScore100
             : typeof score === "number" && Number.isFinite(score)
               ? Math.round(Math.max(0, Math.min(1, score)) * 100)
               : null;
       const gateReason =
         normalizeScoreGateReason(options?.rankedBreakdown?.gateReason) ??
-        normalizeScoreGateReason(scoredLead?.gateReason);
+        normalizeScoreGateReason(scoredLead?.gateReason) ??
+        normalizeScoreGateReason(leadScoreBreakdown?.gateReason);
       const gatedToZero =
         options?.rankedBreakdown?.gatedToZero === true ||
-        scoredLead?.gatedToZero === true;
+        scoredLead?.gatedToZero === true ||
+        leadScoreBreakdown?.gatedToZero === true;
       const fullText =
         (typeof options?.rankedFullText === "string" && options.rankedFullText.trim()
           ? options.rankedFullText
@@ -2094,11 +2510,19 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         (sourceMetadata && typeof sourceMetadata.lead === "object"
           ? readIdentityKey((sourceMetadata.lead as Record<string, unknown>).identityKey)
           : null);
+      const leadIdentityKey =
+        (readIdentityKey(lead.identityKey) ?? leadIdentityFromMetadata)?.toLowerCase() ?? null;
       const statusStorageKey = resolvePostStatusStorageKey({
         leadId: lead.leadId,
         identityKey: readIdentityKey(lead.identityKey) ?? leadIdentityFromMetadata,
         canonicalUrl: lead.canonicalUrl ?? viewPostUrl,
       });
+      const canonicalUrlKey = normalizeUrlForLookup(lead.canonicalUrl ?? viewPostUrl ?? "");
+      const runContext = mergeKey ? feedRunContextByMergeKey[mergeKey] : null;
+      const runContextLabel = runContext
+        ? `From search: ${runContext.role} · ${runContext.location}`
+        : null;
+      const showRunContextBadge = Boolean(runContextLabel);
       const provenanceDetails = [
         sourceSignal
           ? `Source: ${
@@ -2142,12 +2566,18 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       return {
         key: `${lead.leadId ?? rowIndex}-${lead.canonicalUrl}-feed`,
         lead,
+        mergeKey,
+        runContextLabel,
+        showRunContextBadge,
+        leadIdentityKey,
+        canonicalUrlKey,
         displayRoleTitle,
         displayPostAuthor,
         displayPostAuthorUrl,
         authorProfile,
         freshness,
         sourceSignal,
+        resolvedWorkMode,
         authorTypeLabel,
         locationDisplay,
         score,
@@ -2187,9 +2617,6 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
         seenCanonicalUrls.add(canonicalLookup);
 
         const matchedLead = leadByUrl.get(canonicalUrl) ?? leadByUrl.get(canonicalLookup);
-        const inferredFreshness = inferFreshnessFromSourceMetadata(
-          rankedLead.sourceMetadataJson ?? null,
-        );
         const rankedLocations = Array.isArray(rankedLead.locations)
           ? rankedLead.locations
               .map((loc) => ({
@@ -2234,8 +2661,8 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               postAuthor: typeof rankedLead.author === "string" ? rankedLead.author : null,
               snippet: typeof rankedLead.snippet === "string" ? rankedLead.snippet : null,
               score: typeof rankedLead.leadScore === "number" ? rankedLead.leadScore : null,
-              freshness: inferredFreshness ?? "fresh",
-              sourceBadge: inferredFreshness ?? "fresh",
+              freshness: "fresh",
+              sourceBadge: "fresh",
               jobTitle:
                 typeof rankedLead.titleOrRole === "string" ? rankedLead.titleOrRole : undefined,
               postedAt: typeof rankedLead.postedAt === "string" ? rankedLead.postedAt : null,
@@ -2304,6 +2731,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
     return dedupedRows.deduped;
   }, [
+    feedRunContextByMergeKey,
     postFeedLeads,
     rankedScoredLeads,
     resolveAuthorProfileForLead,
@@ -2323,6 +2751,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     selectedDrawerRow && messageDrawerInstructionByRow[selectedDrawerRow.key]
       ? messageDrawerInstructionByRow[selectedDrawerRow.key]
       : "";
+  const isDeleteConfirmSubmitting = pendingDeleteRow
+    ? Boolean(deletingFeedRowKeys[pendingDeleteRow.key])
+    : false;
   const hasPendingPostFeedFilterChanges =
     postFeedDraftFilters.role !== postFeedAppliedFilters.role ||
     postFeedDraftFilters.location !== postFeedAppliedFilters.location ||
@@ -2441,7 +2872,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
       }
 
       if (postFeedAppliedFilters.workMode !== "any") {
-        const normalizedWorkMode = normalizeWorkModeValue(row.lead.workMode);
+        const normalizedWorkMode = normalizeWorkModeValue(row.resolvedWorkMode);
         if (normalizedWorkMode !== postFeedAppliedFilters.workMode) return false;
       }
 
@@ -2470,7 +2901,29 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   }, [location, postFeedRows, postFeedAppliedFilters, postFeedStatuses]);
 
   const sortedPostFeedRows = React.useMemo(() => {
-    if (postFeedSortMode === "best_match") return filteredPostFeedRows;
+    if (postFeedSortMode === "best_match") {
+      const rows = [...filteredPostFeedRows];
+      rows.sort((a, b) => {
+        const aScore = typeof a.score === "number" && Number.isFinite(a.score) ? a.score : -1;
+        const bScore = typeof b.score === "number" && Number.isFinite(b.score) ? b.score : -1;
+        if (bScore !== aScore) return bScore - aScore;
+
+        const aFinal =
+          typeof a.finalScore100 === "number" && Number.isFinite(a.finalScore100)
+            ? a.finalScore100
+            : -1;
+        const bFinal =
+          typeof b.finalScore100 === "number" && Number.isFinite(b.finalScore100)
+            ? b.finalScore100
+            : -1;
+        if (bFinal !== aFinal) return bFinal - aFinal;
+
+        const aMs = a.lead.postedAt ? new Date(a.lead.postedAt).getTime() : 0;
+        const bMs = b.lead.postedAt ? new Date(b.lead.postedAt).getTime() : 0;
+        return bMs - aMs;
+      });
+      return rows;
+    }
 
     const rows = [...filteredPostFeedRows];
     if (postFeedSortMode === "most_recent") {
@@ -2505,8 +2958,22 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
   );
   const hasAnyFeedRows = postFeedRows.length > 0;
   const isRunActive = isRunning;
-  const isRetrievedVisibleWhileRunning = isRunActive && hasAnyFeedRows;
+  const retrievedVisibleCount = postFeedBreakdown.retrieved + postFeedBreakdown.both;
+  const freshVisibleCount = postFeedBreakdown.fresh + postFeedBreakdown.both;
+  const isRetrievedVisibleWhileRunning =
+    isRunActive && hasAnyFeedRows && retrievedVisibleCount > 0 && freshVisibleCount === 0;
+  const isFreshOnlyVisibleWhileRunning =
+    isRunActive && hasAnyFeedRows && retrievedVisibleCount === 0 && freshVisibleCount > 0;
+  const isMixedVisibleWhileRunning =
+    isRunActive && hasAnyFeedRows && retrievedVisibleCount > 0 && freshVisibleCount > 0;
   const isNoRetrievedWhileRunning = isRunActive && !hasAnyFeedRows;
+  const runningFeedStatusCopy = isRetrievedVisibleWhileRunning
+    ? RUNNING_FEED_STATUS_WITH_RESULTS_COPY
+    : isFreshOnlyVisibleWhileRunning
+      ? RUNNING_FEED_STATUS_FRESH_ONLY_COPY
+      : isMixedVisibleWhileRunning
+        ? RUNNING_FEED_STATUS_MIXED_COPY
+        : null;
   const hasMorePostFeedRows = sortedPostFeedRows.length > visiblePostFeedRows.length;
   const visiblePostFeedBreakdown = React.useMemo(() => {
     let retrieved = 0;
@@ -2566,7 +3033,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
             roleTitle: row.displayRoleTitle,
             company: row.resolvedCompanyRaw ?? null,
             locations,
-            workMode: row.lead.workMode ?? null,
+            workMode: row.resolvedWorkMode,
             employmentType: row.lead.employmentType ?? null,
             postText: row.fullText ?? row.lead.snippet ?? null,
             authorName: row.displayPostAuthor ?? null,
@@ -2630,6 +3097,132 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
     },
     [generatedMessagesByRow],
   );
+
+  const executeDeletePostFromFeed = React.useCallback(async (row: PostFeedRow) => {
+    if (deletingFeedRowKeys[row.key]) return;
+    const leadId = row.lead.leadId;
+    if (typeof leadId !== "number" || !Number.isInteger(leadId) || leadId <= 0) {
+      setRunErrorSummary("Couldn’t hide this post yet. Please rerun and try again.");
+      return;
+    }
+
+    const mergeKey = row.mergeKey;
+    const identityKey = row.leadIdentityKey;
+    const canonicalUrlKey = row.canonicalUrlKey;
+    setDeletingFeedRowKeys((prev) => ({ ...prev, [row.key]: true }));
+
+    if (mergeKey) {
+      setLocallyHiddenMergeKeys((prev) => ({ ...prev, [mergeKey]: true }));
+      setRunNewLeadKeys((prev) => {
+        if (!prev[mergeKey]) return prev;
+        const next = { ...prev };
+        delete next[mergeKey];
+        return next;
+      });
+      setFeedRunContextByMergeKey((prev) => {
+        if (!prev[mergeKey]) return prev;
+        const next = { ...prev };
+        delete next[mergeKey];
+        return next;
+      });
+    }
+    if (identityKey) {
+      setLocallyHiddenIdentityKeys((prev) => ({ ...prev, [identityKey]: true }));
+    }
+    if (canonicalUrlKey) {
+      setLocallyHiddenCanonicalUrls((prev) => ({ ...prev, [canonicalUrlKey]: true }));
+    }
+    setStickyFeedLeads((prev) =>
+      prev.filter((lead) => {
+        const leadMergeKey = resolveLeadMergeKey(lead);
+        if (mergeKey && leadMergeKey && leadMergeKey === mergeKey) return false;
+        const leadIdentityKey = readIdentityKey(lead.identityKey)?.toLowerCase();
+        if (identityKey && leadIdentityKey && leadIdentityKey === identityKey) return false;
+        const leadCanonicalUrlKey = normalizeUrlForLookup(lead.canonicalUrl);
+        if (canonicalUrlKey && leadCanonicalUrlKey && leadCanonicalUrlKey === canonicalUrlKey) {
+          return false;
+        }
+        const leadPostUrlKey = lead.postUrl ? normalizeUrlForLookup(lead.postUrl) : null;
+        if (canonicalUrlKey && leadPostUrlKey && leadPostUrlKey === canonicalUrlKey) return false;
+        return true;
+      }),
+    );
+    if (messageDrawerRowKey === row.key) {
+      setMessageDrawerRowKey(null);
+    }
+
+    try {
+      const response = await fetch(`/api/leads/${leadId}/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          eventType: "hidden",
+        }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          ok?: false;
+          error?: { message?: string };
+        } | null;
+        throw new Error(readApiErrorMessage(body ?? null, "Failed to hide post"));
+      }
+    } catch (error) {
+      setRunErrorSummary(
+        summarizeUiError({
+          source: "run",
+          rawMessage: error instanceof Error ? error.message : "Failed to hide post",
+        }),
+      );
+    } finally {
+      setDeletingFeedRowKeys((prev) => {
+        const next = { ...prev };
+        delete next[row.key];
+        return next;
+      });
+    }
+  }, [deletingFeedRowKeys, messageDrawerRowKey]);
+
+  const closeDeleteConfirmOverlay = React.useCallback(() => {
+    setIsDeleteConfirmOpen(false);
+    setPendingDeleteRow(null);
+    setRememberSkipDeleteConfirm(false);
+  }, []);
+
+  const onRequestDeletePostFromFeed = React.useCallback(
+    (row: PostFeedRow) => {
+      if (deletingFeedRowKeys[row.key]) return;
+      if (skipDeleteConfirm) {
+        void executeDeletePostFromFeed(row);
+        return;
+      }
+      setPendingDeleteRow(row);
+      setRememberSkipDeleteConfirm(false);
+      setIsDeleteConfirmOpen(true);
+    },
+    [deletingFeedRowKeys, executeDeletePostFromFeed, skipDeleteConfirm],
+  );
+
+  const onConfirmDeletePostFromFeed = React.useCallback(() => {
+    if (!pendingDeleteRow) return;
+    if (rememberSkipDeleteConfirm) {
+      setSkipDeleteConfirm(true);
+      try {
+        window.localStorage.setItem(deleteConfirmPreferenceKey, "1");
+      } catch {
+        // Ignore storage write failures.
+      }
+    }
+    const row = pendingDeleteRow;
+    closeDeleteConfirmOverlay();
+    void executeDeletePostFromFeed(row);
+  }, [
+    closeDeleteConfirmOverlay,
+    deleteConfirmPreferenceKey,
+    executeDeletePostFromFeed,
+    pendingDeleteRow,
+    rememberSkipDeleteConfirm,
+  ]);
 
   const costGuardMetrics = React.useMemo(() => {
     const searchSnapshot = result?.snapshots?.searchResults as
@@ -2924,29 +3517,30 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
 
   async function startRun() {
     if (isRunning) return;
-    const nextSearchKey = normalizeSearchContextKey(role, location, recencyPreference);
+    // Enter running state immediately on click; do not block on saved-feed sync.
+    setIsRunning(true);
+    void loadSavedFeed({ force: true, authKey: userId ?? "guest", reason: "run_start" });
+
     const normalizedSticky = dedupeFinalLeadCardsByRedundancy(stickyFeedLeads);
     const stickyLeadsForRun = normalizedSticky.deduped;
-    const hasStickyFeed = stickyLeadsForRun.length > 0;
-    const isSameContextRerun = hasStickyFeed && activeSearchKey === nextSearchKey;
-    const shownIdentityKeys = isSameContextRerun ? extractShownIdentityKeys(stickyLeadsForRun) : [];
+    const hasExistingFeed = stickyLeadsForRun.length > 0;
+    const shownIdentityKeys = hasExistingFeed ? extractShownIdentityKeys(stickyLeadsForRun) : [];
 
-    runSearchKeyRef.current = nextSearchKey;
-    runBaseStickyCountRef.current = isSameContextRerun ? stickyLeadsForRun.length : 0;
-    runStartedWithExistingFeedRef.current = isSameContextRerun;
+    runStartedWithExistingFeedRef.current = hasExistingFeed;
     runAccumulatedAddedCountRef.current = 0;
-    setRunStartedWithExistingFeed(isSameContextRerun);
+    setRunStartedWithExistingFeed(hasExistingFeed);
     setRunNewLeadKeys({});
     setLastRunNewLeadCount(null);
-    setActiveSearchKey(nextSearchKey);
+    currentRunContextRef.current = {
+      role,
+      location,
+      searchRunId: null,
+      shownAt: new Date().toISOString(),
+    };
     if (normalizedSticky.droppedCount > 0) {
       setStickyFeedLeads(stickyLeadsForRun);
     }
-    if (!isSameContextRerun) {
-      setStickyFeedLeads([]);
-    }
 
-    setIsRunning(true);
     setResult(null);
     setRunErrorSummary(null);
     setNodewiseExplanation(null);
@@ -3132,9 +3726,11 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               },
             ]);
           } else if (evt.type === "interim_results") {
-            const incomingLeads = Array.isArray(evt.payload?.leads)
+            const incomingLeads = (Array.isArray(evt.payload?.leads)
               ? (evt.payload.leads as FinalLeadCard[])
-              : [];
+              : []
+            ).filter((lead) => !isLeadLocallyHidden(lead));
+            applyRunContextForIncomingLeads(incomingLeads);
             if (incomingLeads.length > 0) {
               setStickyFeedLeads((prev) => {
                 const { merged, addedCount, addedKeys } = mergeNetNewLeads(prev, incomingLeads);
@@ -3149,16 +3745,21 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                 return merged;
               });
             }
-            setInterimFinalResponse(evt.payload);
+            setInterimFinalResponse({
+              ...evt.payload,
+              leads: incomingLeads,
+            });
           } else if (evt.type === "final") {
             setLiveSequence(evt.payload.sequence ?? []);
             const finalResponseSnapshot = evt.payload?.snapshots?.finalResponse as
               | { leads?: FinalLeadCard[] }
               | null
               | undefined;
-            const incomingLeads = Array.isArray(finalResponseSnapshot?.leads)
+            const incomingLeads = (Array.isArray(finalResponseSnapshot?.leads)
               ? finalResponseSnapshot.leads
-              : [];
+              : []
+            ).filter((lead) => !isLeadLocallyHidden(lead));
+            applyRunContextForIncomingLeads(incomingLeads);
             if (incomingLeads.length > 0) {
               setStickyFeedLeads((prev) => {
                 const { merged, addedCount, addedKeys } = mergeNetNewLeads(prev, incomingLeads);
@@ -3822,10 +4423,10 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
               </div>
 
               <div className="max-h-[72vh] overflow-y-auto bg-background p-4 scroll-smooth lg:h-[calc(100vh-170px)] lg:max-h-none">
-                {isRetrievedVisibleWhileRunning ? (
+                {runningFeedStatusCopy ? (
                   <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--intent-muted-border)] bg-[var(--brand-soft)] px-3 py-2 text-xs text-foreground">
                     <span className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--intent-primary)]" />
-                    <span>{RUNNING_FEED_STATUS_WITH_RESULTS_COPY}</span>
+                    <span>{runningFeedStatusCopy}</span>
                   </div>
                 ) : null}
                 {!isRunActive && lastRunNewLeadCount != null ? (
@@ -3915,13 +4516,15 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                       <PostCard
                         key={row.key}
                         title={row.displayRoleTitle}
+                        runContextLabel={row.runContextLabel}
+                        showRunContextBadge={row.showRunContextBadge}
                         company={row.companyDisplayText}
                         locationDisplay={row.locationDisplay}
                         postAuthor={row.displayPostAuthor ?? null}
                         authorHeadline={row.authorProfile?.headline ?? null}
                         authorTypeLabel={row.authorTypeLabel}
                         postedAt={row.lead.postedAt ?? null}
-                        workMode={row.lead.workMode ?? null}
+                        workMode={row.resolvedWorkMode}
                         leadScore={row.score}
                         roleMatchScore={row.roleMatchScore}
                         locationMatchScore={row.locationMatchScore}
@@ -3954,6 +4557,13 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                         status={coercePostReviewStatus(postFeedStatuses[row.statusStorageKey])}
                         onStatusChange={(nextStatus) =>
                           setPostFeedStatus(row.statusStorageKey, nextStatus)
+                        }
+                        onRequestDeleteFromFeed={() => onRequestDeletePostFromFeed(row)}
+                        isDeleting={Boolean(deletingFeedRowKeys[row.key])}
+                        canDelete={
+                          typeof row.lead.leadId === "number" &&
+                          Number.isInteger(row.lead.leadId) &&
+                          row.lead.leadId > 0
                         }
                         isLocationLowConfidence={row.isLocationLowConfidence}
                         isCompanyLowConfidence={row.isCompanyLowConfidence}
@@ -4746,6 +5356,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                               <td colSpan={5} className="px-3 py-3">
                                 {breakdown ? (
                                   <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+                                    <p className="sm:col-span-2 lg:col-span-3 font-medium">
+                                      Active formula: 0.5*role + 0.3*location + 0.2*poster
+                                    </p>
                                     <p>roleMatchScore: {breakdown.roleMatchScore.toFixed(3)}</p>
                                     <p>
                                       locationMatchScore: {breakdown.locationMatchScore.toFixed(3)}
@@ -4755,16 +5368,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                       {breakdown.authorStrengthScore.toFixed(3)}
                                     </p>
                                     <p>
-                                      hiringIntentScore: {breakdown.hiringIntentScore.toFixed(3)}
-                                    </p>
-                                    <p>
-                                      intentBoost:{" "}
-                                      {typeof breakdown.intentBoost === "number"
-                                        ? breakdown.intentBoost
-                                        : "-"}
-                                    </p>
-                                    <p>
-                                      employmentTypeScore:{" "}
+                                      employmentTypeScore (info):{" "}
                                       {breakdown.employmentTypeScore.toFixed(3)}
                                     </p>
                                     <p>
@@ -4779,10 +5383,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                         ? breakdown.finalScore100.toFixed(0)
                                         : "-"}
                                     </p>
-                                    <p>
-                                      gatedToZero: {breakdown.gatedToZero ? "true" : "false"}
-                                    </p>
-                                    <p>gateReason: {breakdown.gateReason ?? "none"}</p>
+                                    <p>hiringIntentScore (info): {breakdown.hiringIntentScore.toFixed(3)}</p>
                                     <p>
                                       final leadScore:{" "}
                                       {lead.score != null ? lead.score.toFixed(3) : "unscored"}
@@ -5033,6 +5634,9 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                               <td colSpan={16} className="px-3 py-3">
                                 {scoredLead ? (
                                   <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+                                    <p className="sm:col-span-2 lg:col-span-3 font-medium">
+                                      Active formula: 0.5*role + 0.3*location + 0.2*poster
+                                    </p>
                                     <p>leadScore: {scoredLead.leadScore.toFixed(3)}</p>
                                     <p>roleMatchScore: {scoredLead.roleMatchScore.toFixed(3)}</p>
                                     <p>
@@ -5043,16 +5647,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                       {scoredLead.authorStrengthScore.toFixed(3)}
                                     </p>
                                     <p>
-                                      hiringIntentScore: {scoredLead.hiringIntentScore.toFixed(3)}
-                                    </p>
-                                    <p>
-                                      intentBoost:{" "}
-                                      {typeof scoredLead.intentBoost === "number"
-                                        ? scoredLead.intentBoost
-                                        : "-"}
-                                    </p>
-                                    <p>
-                                      employmentTypeScore:{" "}
+                                      employmentTypeScore (info):{" "}
                                       {scoredLead.employmentTypeScore.toFixed(3)}
                                     </p>
                                     <p>
@@ -5067,10 +5662,7 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
                                         ? scoredLead.finalScore100.toFixed(0)
                                         : "-"}
                                     </p>
-                                    <p>
-                                      gatedToZero: {scoredLead.gatedToZero ? "true" : "false"}
-                                    </p>
-                                    <p>gateReason: {scoredLead.gateReason ?? "none"}</p>
+                                    <p>hiringIntentScore (info): {scoredLead.hiringIntentScore.toFixed(3)}</p>
                                     <p>
                                       rawLocationText:{" "}
                                       {scoredLead.rawLocationText ?? "Location not specified"}
@@ -5100,6 +5692,45 @@ export function DebugTabClient({ mode = "agent" }: { mode?: DebugTabMode }) {
           </Card>
         </>
       )}
+      {isDeleteConfirmOpen && pendingDeleteRow ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-sm rounded-lg border border-[var(--intent-muted-border)] bg-background p-4 shadow-xl">
+            <h3 className="text-sm font-semibold text-foreground">Hide this post from your feed?</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              You won’t see this post again in future runs.
+            </p>
+            <label className="mt-3 flex items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={rememberSkipDeleteConfirm}
+                onChange={(event) => setRememberSkipDeleteConfirm(event.target.checked)}
+                className="h-3.5 w-3.5 rounded border border-input"
+              />
+              <span>Don’t show me this again</span>
+            </label>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={closeDeleteConfirmOverlay}
+                disabled={isDeleteConfirmSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                onClick={onConfirmDeletePostFromFeed}
+                disabled={isDeleteConfirmSubmitting}
+              >
+                {isDeleteConfirmSubmitting ? "Hiding..." : "Hide post"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

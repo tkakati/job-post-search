@@ -268,6 +268,184 @@ function readStoredPostContext(raw: Record<string, unknown>): LinkedinPostContex
   };
 }
 
+type StructuredFieldSource = "llm" | "provider_raw" | "heuristic" | "missing";
+
+function readMetadataString(meta: Record<string, unknown>, key: string): string | null {
+  return normalizeNullableString(meta[key]);
+}
+
+function readProviderRawCompany(meta: Record<string, unknown>): string | null {
+  const direct =
+    readMetadataString(meta, "company") ??
+    readMetadataString(meta, "companyName") ??
+    readMetadataString(meta, "organizationName");
+  if (direct) return direct;
+  const nestedCompany =
+    meta.company && typeof meta.company === "object"
+      ? (meta.company as Record<string, unknown>)
+      : null;
+  if (!nestedCompany) return null;
+  return readMetadataString(nestedCompany, "name");
+}
+
+function readProviderRawLocation(meta: Record<string, unknown>): string | null {
+  const direct = readMetadataString(meta, "location");
+  if (direct) return direct;
+
+  const locationObject =
+    meta.location && typeof meta.location === "object"
+      ? (meta.location as Record<string, unknown>)
+      : null;
+  if (locationObject) {
+    const parsed =
+      readMetadataString(locationObject, "text") ??
+      readMetadataString(locationObject, "linkedinText") ??
+      (locationObject.parsed && typeof locationObject.parsed === "object"
+        ? readMetadataString(locationObject.parsed as Record<string, unknown>, "text")
+        : null);
+    if (parsed) return parsed;
+  }
+
+  const city = readMetadataString(meta, "city");
+  const state = readMetadataString(meta, "state");
+  const country = readMetadataString(meta, "country");
+  if (city && state) return `${city}, ${state}`;
+  if (city && country) return `${city}, ${country}`;
+  if (state && country) return `${state}, ${country}`;
+  return city ?? state ?? country ?? null;
+}
+
+function sanitizeInferredCompany(value: string): string | null {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  const normalized = compact.replace(/^[\W_]+|[\W_]+$/g, "");
+  if (!normalized) return null;
+  const lower = normalized.toLowerCase();
+  if (["my team", "our team", "the team", "team", "we", "us"].includes(lower)) return null;
+  if (
+    /\b(manager|engineer|developer|designer|recruiter|director|lead|intern|contract|full[-\s]?time|part[-\s]?time)\b/i.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+  if (normalized.split(" ").length > 6) return null;
+  return normalized;
+}
+
+function inferCompanyFromText(value: string): string | null {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const patterns = [
+    /\bjoin\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})\b/,
+    /\b([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})\s+(?:is|are|'s|’s)\s+hiring\b/i,
+    /\bhiring\s+at\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})\b/i,
+    /\bat\s+([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4})\b\s*(?:,|-|for)\s*(?:hiring|openings|roles)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const candidate = sanitizeInferredCompany(match?.[1] ?? "");
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+function inferLocationFromText(value: string): string | null {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const commaStateMatch = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2})\b/);
+  if (commaStateMatch?.[1]) return commaStateMatch[1];
+  const cityCountryMatch = text.match(
+    /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*(?:United States|USA|US|Canada|India|United Kingdom|UK|Germany|France|Australia|Singapore|Netherlands|Ireland))\b/i,
+  );
+  if (cityCountryMatch?.[1]) return cityCountryMatch[1];
+  if (/\bremote\b/i.test(text)) return "Remote";
+  return null;
+}
+
+function inferWorkModeFromText(value: string): "onsite" | "hybrid" | "remote" | null {
+  const text = value.toLowerCase();
+  if (/\bhybrid\b/.test(text)) return "hybrid";
+  if (/\bremote\b|\bwfh\b|work from home/.test(text)) return "remote";
+  if (/\bonsite\b|on-site|in office|on site/.test(text)) return "onsite";
+  return null;
+}
+
+function inferEmploymentTypeFromText(
+  value: string,
+): "full-time" | "part-time" | "contract" | "internship" | null {
+  const text = value.toLowerCase();
+  if (/full[\s-]?time/.test(text)) return "full-time";
+  if (/part[\s-]?time/.test(text)) return "part-time";
+  if (/\bcontract\b|\bcontractor\b/.test(text)) return "contract";
+  if (/\bintern(ship)?\b/.test(text)) return "internship";
+  return null;
+}
+
+function resolveStructuredFallbacks(input: {
+  extracted: {
+    role: string | null;
+    location: string | null;
+    company: string | null;
+    employmentType: "full-time" | "part-time" | "contract" | "internship" | null;
+    workMode: "onsite" | "hybrid" | "remote" | null;
+  };
+  post: RawPost;
+}) {
+  const meta = input.post.metadata;
+  const combinedText = `${input.extracted.role ?? ""} ${input.post.rawText}`.trim();
+
+  let company = normalizeNullableString(input.extracted.company);
+  let companySource: StructuredFieldSource = company ? "llm" : "missing";
+  if (!company) {
+    company = readProviderRawCompany(meta);
+    companySource = company ? "provider_raw" : "missing";
+  }
+  if (!company) {
+    company = inferCompanyFromText(combinedText);
+    companySource = company ? "heuristic" : "missing";
+  }
+
+  let location = normalizeNullableString(input.extracted.location);
+  let locationSource: StructuredFieldSource = location ? "llm" : "missing";
+  if (!location) {
+    location = readProviderRawLocation(meta);
+    locationSource = location ? "provider_raw" : "missing";
+  }
+  if (!location) {
+    location = inferLocationFromText(combinedText);
+    locationSource = location ? "heuristic" : "missing";
+  }
+
+  let workMode: "onsite" | "hybrid" | "remote" | null = input.extracted.workMode;
+  let workModeSource: StructuredFieldSource = workMode ? "llm" : "missing";
+  if (!workMode) {
+    workMode = inferWorkModeFromText(combinedText);
+    workModeSource = workMode ? "heuristic" : "missing";
+  }
+
+  let employmentType: "full-time" | "part-time" | "contract" | "internship" | null =
+    input.extracted.employmentType;
+  let employmentTypeSource: StructuredFieldSource = employmentType ? "llm" : "missing";
+  if (!employmentType) {
+    employmentType = inferEmploymentTypeFromText(combinedText);
+    employmentTypeSource = employmentType ? "heuristic" : "missing";
+  }
+
+  return {
+    company,
+    location,
+    workMode,
+    employmentType,
+    fieldSources: {
+      company: companySource,
+      location: locationSource,
+      workMode: workModeSource,
+      employmentType: employmentTypeSource,
+    },
+  };
+}
+
 async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
   if (leadsIn.length === 0) {
     return {
@@ -276,6 +454,8 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
       skippedExisting: 0,
       updated: 0,
       sourceLinksInserted: 0,
+      persistedIdByCanonicalUrl: {} as Record<string, number>,
+      persistedIdByIdentityKey: {} as Record<string, number>,
     };
   }
 
@@ -340,7 +520,6 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
     fetchedAt: lead.fetchedAt ? new Date(lead.fetchedAt) : new Date(),
     roleEmbedding: lead.roleEmbedding ?? null,
     hiringIntentScore: lead.hiringIntentScore ?? null,
-    leadScore: lead.leadScore ?? null,
     roleLocationKey: lead.roleLocationKey,
     sourceMetadataJson: lead.sourceMetadataJson ?? null,
   });
@@ -424,6 +603,8 @@ async function persistExtractedLeadEnrichment(leadsIn: LeadRecord[]) {
     skippedExisting: 0,
     updated: toUpdate.length,
     sourceLinksInserted: sourceRows.length,
+    persistedIdByCanonicalUrl: Object.fromEntries(idByCanonicalUrl.entries()),
+    persistedIdByIdentityKey: Object.fromEntries(idByIdentityKey.entries()),
   };
 }
 
@@ -472,21 +653,31 @@ function toLeadRecord(input: {
     reposterAuthorProfileUrl: authorProfileUrlFromRaw(input.post.metadata),
     reposterText: normalizeNullableString(input.post.metadata.text),
   };
-  const parsedLocations = parseRawLocationText(input.extracted.location);
+  const structuredFallbacks = resolveStructuredFallbacks({
+    extracted: {
+      role: input.extracted.role,
+      location: input.extracted.location,
+      company: input.extracted.company,
+      employmentType: input.extracted.employmentType,
+      workMode: input.extracted.workMode,
+    },
+    post: input.post,
+  });
+  const parsedLocations = parseRawLocationText(structuredFallbacks.location);
 
   return {
     canonicalUrl: identity.canonicalUrl,
     identityKey: identity.identityKey,
     sourceType: "linkedin-content",
     titleOrRole: title,
-    company: input.extracted.company,
+    company: structuredFallbacks.company,
     locations: parsedLocations,
-    rawLocationText: input.extracted.location,
+    rawLocationText: structuredFallbacks.location,
     normalizedLocationJson: {
       locations: parsedLocations,
     },
-    employmentType: input.extracted.employmentType,
-    workMode: input.extracted.workMode,
+    employmentType: structuredFallbacks.employmentType,
+    workMode: structuredFallbacks.workMode,
     author: authorName,
     snippet: input.post.rawText.slice(0, 400),
     fullText: input.post.rawText,
@@ -499,15 +690,16 @@ function toLeadRecord(input: {
     sourceMetadataJson: {
       extraction: {
         role: input.extracted.role,
-        location: input.extracted.location,
-        company: input.extracted.company,
-        employmentType: input.extracted.employmentType,
+        location: structuredFallbacks.location,
+        company: structuredFallbacks.company,
+        employmentType: structuredFallbacks.employmentType,
         yearsOfExperience: input.extracted.yearsOfExperience,
-        workMode: input.extracted.workMode,
+        workMode: structuredFallbacks.workMode,
         isHiring: input.extracted.isHiring,
         authorTypeGuess: input.extracted.authorTypeGuess,
         authorTypeReason: input.extracted.authorTypeReason,
         authorStrengthScore: 0.5,
+        fieldSources: structuredFallbacks.fieldSources,
         // Keep author enrichment in extraction metadata for debug/UI display.
         email_ID: authorProfile?.email_ID ?? null,
         authorLocation: authorProfile?.location ?? null,
@@ -861,6 +1053,19 @@ export async function extractionNode(state: AgentGraphState) {
   );
   const dedupedExtractedLeads = dedupeExtractedByContent(extractedLeads);
   const persistenceSummary = await persistExtractedLeadEnrichment(dedupedNormalizedLeads);
+  const hydratedNormalizedLeads = dedupedNormalizedLeads.map((lead) => {
+    const persistedId =
+      persistenceSummary.persistedIdByCanonicalUrl[lead.canonicalUrl] ??
+      persistenceSummary.persistedIdByIdentityKey[lead.identityKey] ??
+      lead.id;
+    return {
+      ...lead,
+      id:
+        typeof persistedId === "number" && Number.isInteger(persistedId)
+          ? persistedId
+          : undefined,
+    };
+  });
 
   const avgScore =
     extractedLeads.length > 0
@@ -893,7 +1098,7 @@ export async function extractionNode(state: AgentGraphState) {
         score: 0,
       }),
     ),
-    normalizedLeads: dedupedNormalizedLeads,
+    normalizedLeads: hydratedNormalizedLeads,
     extractionDiagnostics: {
       postsProcessed: rawPosts.length,
       successfullyExtracted: dedupedExtractedLeads.filter(
@@ -918,11 +1123,11 @@ export async function extractionNode(state: AgentGraphState) {
     },
   });
 
-  const topRank = dedupedNormalizedLeads
+  const topRank = hydratedNormalizedLeads
     .slice(0, 20)
     .map((lead) => lead.titleOrRole)
     .join(" | ");
-  const authorTypeGuessStats = dedupedNormalizedLeads.reduce(
+  const authorTypeGuessStats = hydratedNormalizedLeads.reduce(
     (acc, lead) => {
       const extraction =
         lead.sourceMetadataJson &&

@@ -50,6 +50,8 @@ const AgentStateAnnotation = Annotation.Root({
   taskComplete: Annotation<boolean>(),
 
   shownLeadIdentityKeys: Annotation<string[]>(),
+  hiddenLeadIdentityKeys: Annotation<string[]>(),
+  hiddenLeadCanonicalUrls: Annotation<string[]>(),
   debugLog: Annotation<string[]>(),
 });
 

@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { ensureAnonymousSession } from "@/lib/api/session";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { LeadEventInputSchema } from "@/lib/schemas/api";
 import { recordLeadEvent } from "@/lib/api/search-runs";
 import { apiError, apiOk } from "@/lib/api/response";
@@ -40,9 +40,13 @@ export async function POST(
     }
 
     const cookieStore = await cookies();
-    const userSessionId = await ensureAnonymousSession(cookieStore);
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
     await recordLeadEvent({
-      userSessionId,
+      userSessionId: session.userSessionId,
       leadId: parsedParams.data.id,
       ...parsedBody.data,
     });
@@ -58,4 +62,3 @@ export async function POST(
     });
   }
 }
-

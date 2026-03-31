@@ -29,7 +29,6 @@ type LeadDbRow = {
   fetchedAt: Date | null;
   roleEmbedding: number[] | null;
   hiringIntentScore: number | null;
-  leadScore: number | null;
   roleLocationKey: string;
   sourceMetadataJson: Record<string, unknown> | null;
   createdAt: Date;
@@ -80,7 +79,6 @@ export async function fetchLeadsForRoleLocation(input: {
       fetchedAt: leads.fetchedAt,
       roleEmbedding: leads.roleEmbedding,
       hiringIntentScore: leads.hiringIntentScore,
-      leadScore: leads.leadScore,
       roleLocationKey: leads.roleLocationKey,
       sourceMetadataJson: leads.sourceMetadataJson,
       createdAt: leads.createdAt,
@@ -171,7 +169,6 @@ function normalizeLead(lead: LeadDbRow): LeadRecord {
         ? lead.roleEmbedding
         : null,
     hiringIntentScore: lead.hiringIntentScore,
-    leadScore: lead.leadScore,
     roleLocationKey: lead.roleLocationKey,
     sourceMetadataJson: lead.sourceMetadataJson ?? null,
   };
@@ -287,12 +284,11 @@ export function dedupeRetrievedLeadsByRedundancy(input: { leads: LeadRecord[] })
     }),
     getRichnessScore: (lead) => {
       let score = 0;
-      if (typeof lead.leadScore === "number" && Number.isFinite(lead.leadScore)) {
-        score += lead.leadScore * 100;
-      }
       if (lead.fullText && lead.fullText.trim()) score += 4;
       if (lead.snippet && lead.snippet.trim()) score += 2;
       if (lead.company && lead.company.trim()) score += 1;
+      if (lead.postedAt && lead.postedAt.trim()) score += 1;
+      else if (lead.fetchedAt && lead.fetchedAt.trim()) score += 0.5;
       return score;
     },
   });
@@ -300,6 +296,58 @@ export function dedupeRetrievedLeadsByRedundancy(input: { leads: LeadRecord[] })
     dedupedLeads: deduped.deduped,
     redundantDroppedCount: deduped.droppedCount,
   };
+}
+
+function normalizeIdentityKey(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeUrlForLookup(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function filterHiddenLeads(input: {
+  leads: LeadRecord[];
+  hiddenIdentityKeys: string[];
+  hiddenCanonicalUrls: string[];
+}) {
+  const hiddenIdentitySet = new Set(
+    input.hiddenIdentityKeys
+      .map((value) => normalizeIdentityKey(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+  const hiddenCanonicalUrlSet = new Set(
+    input.hiddenCanonicalUrls
+      .map((value) => normalizeUrlForLookup(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  let hiddenDroppedCount = 0;
+  const visibleLeads: LeadRecord[] = [];
+  for (const lead of input.leads) {
+    const identityKey = normalizeIdentityKey(lead.identityKey);
+    const canonicalUrl = normalizeUrlForLookup(lead.canonicalUrl);
+    if ((identityKey && hiddenIdentitySet.has(identityKey)) || (canonicalUrl && hiddenCanonicalUrlSet.has(canonicalUrl))) {
+      hiddenDroppedCount += 1;
+      continue;
+    }
+    visibleLeads.push(lead);
+  }
+  return { visibleLeads, hiddenDroppedCount };
 }
 
 /**
@@ -334,9 +382,14 @@ export async function retrievalArmNode(state: AgentGraphState) {
   const redundancyFiltered = dedupeRetrievedLeadsByRedundancy({
     leads: countryFiltered.eligibleLeads,
   });
+  const hiddenFiltered = filterHiddenLeads({
+    leads: redundancyFiltered.dedupedLeads,
+    hiddenIdentityKeys: state.hiddenLeadIdentityKeys,
+    hiddenCanonicalUrls: state.hiddenLeadCanonicalUrls,
+  });
   const leadsWithShown = await markLeadsShownVsUnseen({
     userSessionId: state.userSessionId,
-    normalizedLeads: redundancyFiltered.dedupedLeads,
+    normalizedLeads: hiddenFiltered.visibleLeads,
   });
 
   const elapsedMs = Date.now() - t0;
@@ -395,7 +448,7 @@ export async function retrievalArmNode(state: AgentGraphState) {
     },
     debugLog: appendDebug(
       state,
-      `retrieval_arm => phase=${retrievalPhase}, next=${next}, countryEligibleCount=${countryFiltered.eligibleLeads.length}, countryMismatchDroppedCount=${countryFiltered.countryMismatchDroppedCount}, countryUnknownCount=${countryFiltered.countryUnknownCount}, redundantDroppedCount=${redundancyFiltered.redundantDroppedCount}, retrievalAfterRedundancyDedupe=${redundancyFiltered.dedupedLeads.length}`,
+      `retrieval_arm => phase=${retrievalPhase}, next=${next}, countryEligibleCount=${countryFiltered.eligibleLeads.length}, countryMismatchDroppedCount=${countryFiltered.countryMismatchDroppedCount}, countryUnknownCount=${countryFiltered.countryUnknownCount}, redundantDroppedCount=${redundancyFiltered.redundantDroppedCount}, hiddenDroppedCount=${hiddenFiltered.hiddenDroppedCount}, retrievalAfterRedundancyDedupe=${hiddenFiltered.visibleLeads.length}`,
     ),
   };
 }

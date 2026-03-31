@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Copy, ExternalLink, Eye } from "lucide-react";
+import { Copy, ExternalLink, Eye, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -23,6 +23,8 @@ import {
 
 export type PostCardProps = {
   title: string;
+  runContextLabel?: string | null;
+  showRunContextBadge?: boolean;
   company?: string | null;
   locationDisplay: LocationDisplayOutput;
   postAuthor?: string | null;
@@ -60,6 +62,9 @@ export type PostCardProps = {
   showResumeNudge?: boolean;
   status?: PostReviewStatus;
   onStatusChange?: (status: PostReviewStatus) => void;
+  onRequestDeleteFromFeed?: () => void;
+  isDeleting?: boolean;
+  canDelete?: boolean;
   isLocationLowConfidence?: boolean;
   isCompanyLowConfidence?: boolean;
   isPostedByCompany?: boolean;
@@ -176,15 +181,13 @@ function toScore100Label(score: number | null | undefined) {
   return String(Math.round(Math.max(0, Math.min(100, score))));
 }
 
-function gateReasonLabel(
-  gateReason: PostCardProps["gateReason"],
-): string | null {
-  if (gateReason === "hiring_intent_zero") return "Score 0: Hiring intent is 0";
-  if (gateReason === "employment_type_mismatch") return "Score 0: Employment type mismatch";
-  if (gateReason === "hard_location_mismatch") {
-    return "Score 0: Location mismatch under hard filter";
-  }
-  return null;
+function toWeightedContributionLabel(
+  weight: number,
+  score: number | null | undefined,
+) {
+  if (typeof score !== "number" || !Number.isFinite(score)) return "n/a";
+  const clamped = Math.max(0, Math.min(1, score));
+  return (weight * clamped).toFixed(2);
 }
 
 function toDaysAgoLabel(value: string | null | undefined) {
@@ -201,6 +204,8 @@ function toDaysAgoLabel(value: string | null | undefined) {
 
 export function PostCard({
   title,
+  runContextLabel,
+  showRunContextBadge = false,
   company,
   locationDisplay,
   postAuthor,
@@ -212,14 +217,7 @@ export function PostCard({
   roleMatchScore,
   locationMatchScore,
   authorStrengthScore,
-  hiringIntentScore,
-  engagementScore,
-  employmentTypeScore,
-  baseScore,
-  intentBoost,
   finalScore100,
-  gatedToZero = false,
-  gateReason = null,
   sourceBadge,
   isNew,
   postUrl,
@@ -236,6 +234,9 @@ export function PostCard({
   showResumeNudge = false,
   status = "not_reviewed",
   onStatusChange,
+  onRequestDeleteFromFeed,
+  isDeleting = false,
+  canDelete = false,
   isLocationLowConfidence = false,
   isCompanyLowConfidence = false,
   isPostedByCompany = false,
@@ -269,36 +270,22 @@ export function PostCard({
       isNew,
     ],
   );
-  const hasScoreBreakdownTooltip =
-    (typeof leadScore === "number" && Number.isFinite(leadScore)) ||
-    (typeof roleMatchScore === "number" && Number.isFinite(roleMatchScore)) ||
-    (typeof locationMatchScore === "number" && Number.isFinite(locationMatchScore)) ||
-    (typeof authorStrengthScore === "number" && Number.isFinite(authorStrengthScore)) ||
-    (typeof hiringIntentScore === "number" && Number.isFinite(hiringIntentScore)) ||
-    (typeof engagementScore === "number" && Number.isFinite(engagementScore)) ||
-    (typeof employmentTypeScore === "number" && Number.isFinite(employmentTypeScore)) ||
-    (typeof baseScore === "number" && Number.isFinite(baseScore)) ||
-    (typeof intentBoost === "number" && Number.isFinite(intentBoost)) ||
-    (typeof finalScore100 === "number" && Number.isFinite(finalScore100)) ||
-    gatedToZero ||
-    gateReason !== null;
-  const resolvedHiringIntentScore =
-    typeof hiringIntentScore === "number" && Number.isFinite(hiringIntentScore)
-      ? hiringIntentScore
-      : engagementScore;
   const resolvedScore100 =
     typeof finalScore100 === "number" && Number.isFinite(finalScore100)
       ? finalScore100
       : typeof leadScore === "number" && Number.isFinite(leadScore)
         ? Math.round(Math.max(0, Math.min(1, leadScore)) * 100)
         : null;
-  const resolvedIntentBoost =
-    typeof intentBoost === "number" && Number.isFinite(intentBoost)
-      ? intentBoost
-      : typeof resolvedHiringIntentScore === "number" && Number.isFinite(resolvedHiringIntentScore)
-        ? Math.round(Math.max(0, Math.min(1, resolvedHiringIntentScore)) * 15)
-        : null;
-  const gateSummary = gatedToZero ? gateReasonLabel(gateReason) : null;
+  const hasCompleteFormulaBreakdown =
+    typeof resolvedScore100 === "number" &&
+    Number.isFinite(resolvedScore100) &&
+    typeof roleMatchScore === "number" &&
+    Number.isFinite(roleMatchScore) &&
+    typeof locationMatchScore === "number" &&
+    Number.isFinite(locationMatchScore) &&
+    typeof authorStrengthScore === "number" &&
+    Number.isFinite(authorStrengthScore);
+  const hasScoreBreakdownTooltip = hasCompleteFormulaBreakdown;
   const newTag = display.tags.find((tag) => tag.key === "new");
   const matchTag = display.tags.find((tag) => tag.key === "match_strength");
   const recruiterTag = display.tags.find((tag) => tag.key === "author_type");
@@ -325,10 +312,29 @@ export function PostCard({
   return (
     <Card
       ref={cardRef}
-      className="scroll-mt-24 space-y-2 rounded-lg border border-[var(--intent-muted-border)] bg-background p-3 transition-[border-color,box-shadow] duration-200 hover:border-[color-mix(in_srgb,var(--intent-primary)_20%,var(--intent-muted-border))]"
+      className="relative scroll-mt-24 space-y-2 rounded-lg border border-[var(--intent-muted-border)] bg-background p-3 transition-[border-color,box-shadow] duration-200 hover:border-[color-mix(in_srgb,var(--intent-primary)_20%,var(--intent-muted-border))]"
     >
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,35%)_minmax(0,15%)_minmax(0,20%)_minmax(0,15%)_minmax(0,15%)] lg:items-start">
+      {onRequestDeleteFromFeed ? (
+        <button
+          type="button"
+          aria-label="Hide post from feed"
+          title={canDelete ? "Hide this post from my feed" : "Available after this post is persisted"}
+          className="absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border/70 text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--intent-primary)_32%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onRequestDeleteFromFeed}
+          disabled={!canDelete || isDeleting}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      ) : null}
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,35%)_minmax(0,15%)_minmax(0,20%)_minmax(0,15%)_minmax(0,15%)] lg:items-stretch">
         <div className="min-w-0 space-y-0.5">
+          {showRunContextBadge && runContextLabel ? (
+            <div className="mb-1">
+              <span className="inline-flex max-w-full items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:border-violet-900/50 dark:bg-violet-950/40 dark:text-violet-300">
+                <span className="truncate">{runContextLabel}</span>
+              </span>
+            </div>
+          ) : null}
           <div className="flex items-center gap-1.5">
             <TruncationHoverTooltip text={display.roleCompany.title} className="min-w-0">
               <h3 className="line-clamp-1 text-sm font-semibold">{display.roleCompany.title}</h3>
@@ -401,7 +407,7 @@ export function PostCard({
           </TruncationHoverTooltip>
         </div>
 
-        <div className="min-w-0 lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
+        <div className="min-w-0 lg:self-stretch lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
           <div className="flex flex-col items-start gap-1">
             {newTag ? (
                 <Badge
@@ -428,19 +434,14 @@ export function PostCard({
                         <Eye className="h-2.5 w-2.5" />
                       </button>
                       <div className="pointer-events-none absolute left-0 top-5 z-20 hidden w-72 rounded-md border border-border/70 bg-white p-2 text-left text-[11px] text-foreground shadow-md group-hover:block group-focus-within:block dark:bg-popover dark:text-popover-foreground">
-                        {gateSummary ? (
-                          <p>{gateSummary}</p>
-                        ) : (
-                          <p>
-                            Score {toScore100Label(resolvedScore100)} = Role{" "}
-                            {toFactorLabel(roleMatchScore)}× + Loc{" "}
-                            {toFactorLabel(locationMatchScore)} + Poster{" "}
-                            {toFactorLabel(authorStrengthScore)} + Intent +
-                            {typeof resolvedIntentBoost === "number"
-                              ? resolvedIntentBoost
-                              : "n/a"}
-                          </p>
-                        )}
+                        <p>
+                          Score {toScore100Label(resolvedScore100)} = 0.5*Role{" "}
+                          {toFactorLabel(roleMatchScore)} ({toWeightedContributionLabel(0.5, roleMatchScore)})
+                          {" + "}0.3*Loc {toFactorLabel(locationMatchScore)} (
+                          {toWeightedContributionLabel(0.3, locationMatchScore)})
+                          {" + "}0.2*Poster {toFactorLabel(authorStrengthScore)} (
+                          {toWeightedContributionLabel(0.2, authorStrengthScore)})
+                        </p>
                       </div>
                     </span>
                   ) : null}
@@ -458,7 +459,7 @@ export function PostCard({
           </div>
         </div>
 
-        <div className="min-w-0 space-y-0.5 lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
+        <div className="min-w-0 space-y-0.5 lg:self-stretch lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             POSTED BY
           </p>
@@ -475,7 +476,7 @@ export function PostCard({
           </p>
         </div>
 
-        <div className="flex h-full min-w-[132px] items-center justify-center lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
+        <div className="flex h-full min-w-[132px] items-center justify-center lg:self-stretch lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
           {isPostedByCompany ? (
             <div className="group relative inline-flex">
               <Button
@@ -507,7 +508,7 @@ export function PostCard({
           )}
         </div>
 
-        <div className="flex h-full min-w-[132px] flex-col items-start gap-2 lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
+        <div className="flex h-full min-w-[132px] flex-col items-start gap-2 lg:self-stretch lg:border-l lg:border-[var(--intent-muted-border)] lg:pl-3">
           <div>
             <div className="flex items-center gap-1">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">

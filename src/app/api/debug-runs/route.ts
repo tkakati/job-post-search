@@ -1,7 +1,11 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { ensureAnonymousSession } from "@/lib/api/session";
-import { fetchPriorShownIdentitySet, purgeExpiredLeads } from "@/lib/api/search-runs";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
+import {
+  fetchHiddenLeadExclusions,
+  fetchPriorShownIdentitySet,
+  purgeExpiredLeads,
+} from "@/lib/api/search-runs";
 import { apiError, apiOk } from "@/lib/api/response";
 import { logger } from "@/lib/observability/logger";
 import { createAgentGraph } from "@/lib/agent/graph";
@@ -63,9 +67,20 @@ export async function POST(req: Request) {
     }
 
     const cookieStore = await cookies();
-    const userSessionId = await ensureAnonymousSession(cookieStore);
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
     await purgeExpiredLeads({ olderThanDays: 31 });
-    const persistedShownSet = await fetchPriorShownIdentitySet(userSessionId);
+    const persistedShownSet = await fetchPriorShownIdentitySet({
+      userSessionId: session.userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
+    });
+    const hiddenExclusions = await fetchHiddenLeadExclusions({
+      userSessionId: session.userSessionId,
+      sessionScopeIds: session.sessionScopeIds,
+    });
     const requestShownSet = new Set(
       (parsed.data.shownIdentityKeys ?? [])
         .map((value) => value.trim())
@@ -76,7 +91,7 @@ export async function POST(req: Request) {
     );
 
     const initial = createInitialAgentGraphState({
-      userSessionId,
+      userSessionId: session.userSessionId,
       role: parsed.data.role,
       location: parsed.data.location,
       locationIsHardFilter: parsed.data.locationIsHardFilter ?? false,
@@ -85,6 +100,8 @@ export async function POST(req: Request) {
       maxIterations: parsed.data.maxIterations,
       targetHighQualityLeads: parsed.data.targetHighQualityLeads,
       shownLeadIdentityKeys,
+      hiddenLeadIdentityKeys: Array.from(hiddenExclusions.hiddenIdentityKeys),
+      hiddenLeadCanonicalUrls: Array.from(hiddenExclusions.hiddenCanonicalUrls),
     });
     const graph = createAgentGraph();
 
@@ -195,7 +212,7 @@ export async function POST(req: Request) {
     });
 
     logger.info("debug_run_completed", {
-      userSessionId,
+      userSessionId: session.userSessionId,
       steps: payload.sequence.length,
       stopReason: payload.final.stopReason,
     });
