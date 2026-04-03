@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import OpenAI from "openai";
 import { z } from "zod";
 
 import { env } from "@/lib/env";
+import { recordAnalyticsEvent } from "@/lib/api/analytics-events";
+import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
 import { buildMessageGenerationPrompt } from "@/lib/llm/message-generation-prompt";
 import {
   buildDeterministicMessageFallback,
@@ -160,7 +163,27 @@ async function generateMessageFromPrompt(client: OpenAI, model: string, prompt: 
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
+  const startedAt = Date.now();
+  let sessionContext:
+    | {
+        userId: string;
+        userSessionId: string;
+        isAuthenticated: boolean;
+      }
+    | null = null;
   try {
+    const cookieStore = await cookies();
+    const clerkUserId = await readOptionalClerkUserId();
+    const session = await ensureUserSessionContext({
+      cookieStore,
+      clerkUserId,
+    });
+    sessionContext = {
+      userId: session.userId,
+      userSessionId: session.userSessionId,
+      isAuthenticated: session.isAuthenticated,
+    };
+
     const json = await req.json();
     const parsed = GenerateMessageInputSchema.safeParse(json);
     if (!parsed.success) {
@@ -223,6 +246,19 @@ export async function POST(req: Request) {
 
     const initialValidation = validateGeneratedMessage(message, input.userInstruction ?? null);
     if (initialValidation.isValid) {
+      if (sessionContext) {
+        void recordAnalyticsEvent({
+          context: sessionContext,
+          event: {
+            eventName: "message_generation_completed",
+            source: "api",
+            properties: {
+              latencyMs: Date.now() - startedAt,
+            },
+          },
+          bestEffort: true,
+        });
+      }
       return NextResponse.json({ ok: true, data: { message } });
     }
 
@@ -275,11 +311,53 @@ export async function POST(req: Request) {
         correctedReasons: correctedValidation.reasons,
         deterministicFallbackReasons: deterministicValidation.reasons,
       });
+      if (sessionContext) {
+        void recordAnalyticsEvent({
+          context: sessionContext,
+          event: {
+            eventName: "message_generation_completed",
+            source: "api",
+            properties: {
+              latencyMs: Date.now() - startedAt,
+              usedDeterministicFallback: true,
+            },
+          },
+          bestEffort: true,
+        });
+      }
       return NextResponse.json({ ok: true, data: { message: deterministicFallback } });
     }
 
+    if (sessionContext) {
+      void recordAnalyticsEvent({
+        context: sessionContext,
+        event: {
+          eventName: "message_generation_completed",
+          source: "api",
+          properties: {
+            latencyMs: Date.now() - startedAt,
+            correctedPassUsed: true,
+          },
+        },
+        bestEffort: true,
+      });
+    }
     return NextResponse.json({ ok: true, data: { message: normalizedCorrectedMessage } });
   } catch (error) {
+    if (sessionContext) {
+      void recordAnalyticsEvent({
+        context: sessionContext,
+        event: {
+          eventName: "message_generation_failed",
+          source: "api",
+          properties: {
+            latencyMs: Date.now() - startedAt,
+            errorCode: error instanceof Error ? error.name : "unknown_error",
+          },
+        },
+        bestEffort: true,
+      });
+    }
     return NextResponse.json(
       {
         ok: false,

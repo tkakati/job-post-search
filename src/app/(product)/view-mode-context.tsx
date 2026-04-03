@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-export type ProductViewMode = "post-feed" | "agent";
+export type ProductViewMode = "post-feed" | "agent" | "analytics";
 
 type ProductViewModeContextValue = {
   mode: ProductViewMode;
@@ -12,7 +12,9 @@ type ProductViewModeContextValue = {
 const ProductViewModeContext = React.createContext<ProductViewModeContextValue | null>(null);
 
 function parseViewMode(value: string | null | undefined): ProductViewMode {
-  return value === "agent" ? "agent" : "post-feed";
+  if (value === "agent") return "agent";
+  if (value === "analytics") return "analytics";
+  return "post-feed";
 }
 
 function getWindowViewMode(): ProductViewMode {

@@ -368,3 +368,40 @@ export const leadEvents = pgTable(
     index("lead_events_search_run_id_idx").on(table.searchRunId),
   ],
 );
+
+export const analyticsEvents = pgTable(
+  "analytics_events",
+  {
+    id: serial("id").primaryKey(),
+    eventId: text("event_id").notNull(),
+    eventName: text("event_name").notNull(),
+    eventVersion: text("event_version").notNull().default("v1"),
+    source: text("source").notNull(),
+    occurredAt: timestamp("occurred_at").defaultNow().notNull(),
+
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id),
+    userSessionId: text("user_session_id")
+      .notNull()
+      .references(() => userSessions.id),
+    isAuthenticated: boolean("is_authenticated").notNull().default(false),
+
+    searchId: text("search_id"),
+    searchRunId: integer("search_run_id").references(() => searchRuns.id),
+    iterationNumber: integer("iteration_number"),
+    queryId: text("query_id"),
+    leadId: integer("lead_id").references(() => leads.id),
+
+    propertiesJson: jsonb("properties_json").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("analytics_events_event_id_unique").on(table.eventId),
+    index("analytics_events_occurred_at_idx").on(table.occurredAt),
+    index("analytics_events_event_name_occurred_idx").on(table.eventName, table.occurredAt),
+    index("analytics_events_user_session_idx").on(table.userSessionId),
+    index("analytics_events_search_run_idx").on(table.searchRunId),
+    index("analytics_events_lead_idx").on(table.leadId),
+  ],
+);

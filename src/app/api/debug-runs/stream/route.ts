@@ -1,6 +1,12 @@
 import { cookies } from "next/headers";
+import { createHash } from "crypto";
 import { z } from "zod";
 import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
+import {
+  recordAnalyticsEvent,
+  recordAnalyticsEvents,
+  resolveSearchIdForRun,
+} from "@/lib/api/analytics-events";
 import {
   createSearchRunRecord,
   fetchHiddenLeadExclusions,
@@ -122,6 +128,10 @@ function summarizeStreamRunError(error: unknown): { code: string; message: strin
   return { code: "DEBUG_RUN_FAILED", message: "Run failed. Please try again." };
 }
 
+function hashQueryText(value: string) {
+  return createHash("sha1").update(value).digest("hex");
+}
+
 export async function POST(req: Request) {
   if (!env.DATABASE_URL) {
     return Response.json(
@@ -204,6 +214,36 @@ export async function POST(req: Request) {
     );
   }
 
+  const resolvedSearchId =
+    (await resolveSearchIdForRun(searchRunId)) ??
+    `run:${searchRunId}:${session.userSessionId}:${parsed.data.role}:${parsed.data.location}`;
+
+  void recordAnalyticsEvent({
+    context: {
+      userId: session.userId,
+      userSessionId: session.userSessionId,
+      isAuthenticated: session.isAuthenticated,
+    },
+    event: {
+      eventName: "run_started",
+      source: "api",
+      searchId: resolvedSearchId,
+      runId: searchRunId,
+      properties: {
+        role: parsed.data.role,
+        location: parsed.data.location,
+        locationStrict: parsed.data.locationIsHardFilter ?? false,
+        recency: parsed.data.recencyPreference,
+        employmentType: parsed.data.employmentType ?? null,
+        maxIterations: parsed.data.maxIterations,
+        targetHq: parsed.data.targetHighQualityLeads,
+        shownIdentityCount: shownLeadIdentityKeys.length,
+        hiddenExclusionCount: hiddenIdentityKeys.size + hiddenCanonicalUrls.size,
+      },
+    },
+    bestEffort: true,
+  });
+
   const initial = createInitialAgentGraphState({
     userSessionId: session.userSessionId,
     searchRunId,
@@ -240,6 +280,8 @@ export async function POST(req: Request) {
         log: string;
       }> = [];
       let hasEmittedInterimResults = false;
+      const runStartedAtMs = Date.now();
+      let timeToFirstHqPostMs: number | null = null;
 
       try {
         let apiCallSeq = 0;
@@ -319,6 +361,149 @@ export async function POST(req: Request) {
                 ...state,
                 ...patch,
               });
+
+              const telemetryContext = {
+                userId: session.userId,
+                userSessionId: session.userSessionId,
+                isAuthenticated: session.isAuthenticated,
+              };
+              const iterationIndex =
+                typeof state.iteration === "number" && Number.isFinite(state.iteration)
+                  ? state.iteration
+                  : 0;
+
+              if (node === "query_generation") {
+                const generatedQueries =
+                  state.generatedQueries?.generatedQueries &&
+                  Array.isArray(state.generatedQueries.generatedQueries)
+                    ? state.generatedQueries.generatedQueries
+                    : [];
+                if (generatedQueries.length > 0) {
+                  void recordAnalyticsEvents({
+                    context: telemetryContext,
+                    events: generatedQueries.map((query, index) => ({
+                      eventName: "query_generated" as const,
+                      source: "agent" as const,
+                      searchId: resolvedSearchId,
+                      runId: searchRunId,
+                      iterationIndex,
+                      queryId: `${searchRunId}:${iterationIndex}:${index}:${hashQueryText(query.queryText)}`,
+                      properties: {
+                        queryKind: query.queryKind,
+                        isExplore: query.isExplore,
+                        queryTextHash: hashQueryText(query.queryText),
+                        queryLength: query.queryText.length,
+                        sourceUrl: query.sourceUrl,
+                      },
+                    })),
+                    bestEffort: true,
+                  });
+                }
+              }
+
+              if (node === "retrieval_arm") {
+                void recordAnalyticsEvent({
+                  context: telemetryContext,
+                  event: {
+                    eventName: "retrieval_completed",
+                    source: "agent",
+                    searchId: resolvedSearchId,
+                    runId: searchRunId,
+                    iterationIndex,
+                    properties: {
+                      numPostsRetrieved: state.retrievalResults?.retrievedLeads?.length ?? 0,
+                      retrievalDurationMs:
+                        state.retrievalResults?.retrievalDiagnostics?.elapsedMs ?? null,
+                    },
+                  },
+                  bestEffort: true,
+                });
+              }
+
+              if (node === "extraction_node") {
+                void recordAnalyticsEvent({
+                  context: telemetryContext,
+                  event: {
+                    eventName: "extraction_completed",
+                    source: "agent",
+                    searchId: resolvedSearchId,
+                    runId: searchRunId,
+                    iterationIndex,
+                    properties: {
+                      numPostsExtracted:
+                        state.extractionResults?.normalizedLeads?.length ??
+                        state.extractionResults?.extractedLeads?.length ??
+                        0,
+                      extractionDurationMs:
+                        state.extractionResults?.extractionDiagnostics?.elapsedMs ?? null,
+                      extractionSuccessRate:
+                        typeof state.extractionResults?.extractionDiagnostics?.postsProcessed ===
+                          "number" &&
+                        state.extractionResults.extractionDiagnostics.postsProcessed > 0
+                          ? (state.extractionResults.extractionDiagnostics.successfullyExtracted ??
+                              0) /
+                            state.extractionResults.extractionDiagnostics.postsProcessed
+                          : null,
+                      llmBatchCount:
+                        state.extractionResults?.extractionDiagnostics?.llmBatchCount ?? null,
+                      fallbackBatchCount:
+                        state.extractionResults?.extractionDiagnostics?.fallbackBatchCount ?? null,
+                    },
+                  },
+                  bestEffort: true,
+                });
+              }
+
+              if (node === "scoring_node") {
+                const rankedCount = state.scoringResults?.rankedLeads?.length ?? 0;
+                const hqCount = state.scoringResults?.highQualityLeadsCount ?? 0;
+                if (hqCount > 0 && timeToFirstHqPostMs == null) {
+                  timeToFirstHqPostMs = Date.now() - runStartedAtMs;
+                }
+
+                void recordAnalyticsEvents({
+                  context: telemetryContext,
+                  events: [
+                    {
+                      eventName: "scoring_completed",
+                      source: "agent",
+                      searchId: resolvedSearchId,
+                      runId: searchRunId,
+                      iterationIndex,
+                      properties: {
+                        numHqPosts: hqCount,
+                        averageScore: state.scoringResults?.avgScore ?? 0,
+                        scoringDurationMs: state.scoringResults?.scoringDiagnostics?.elapsedMs ?? null,
+                        timeToFirstHqPostMs,
+                        topScore:
+                          typeof state.scoringResults?.rankedLeads?.[0]?.leadScore === "number"
+                            ? state.scoringResults.rankedLeads[0].leadScore
+                            : null,
+                        scoredCount: rankedCount,
+                      },
+                    },
+                    {
+                      eventName: "iteration_completed",
+                      source: "agent",
+                      searchId: resolvedSearchId,
+                      runId: searchRunId,
+                      iterationIndex,
+                      properties: {
+                        numQueriesGenerated:
+                          state.generatedQueries?.generatedQueries?.length ?? 0,
+                        numPostsRetrieved: state.retrievalResults?.retrievedLeads?.length ?? 0,
+                        numPostsExtracted: state.extractionResults?.normalizedLeads?.length ?? 0,
+                        numHqPosts: hqCount,
+                        averageScore: state.scoringResults?.avgScore ?? null,
+                        iterationDurationMs:
+                          state.combinedResults?.combinedDiagnostics?.totalIterationTimeMs ?? null,
+                        plannerMode: state.plannerOutput?.plannerMode ?? null,
+                      },
+                    },
+                  ],
+                  bestEffort: true,
+                });
+              }
 
               if (
                 !hasEmittedInterimResults &&
@@ -450,6 +635,30 @@ export async function POST(req: Request) {
               scoringResults: state.scoringResults ?? null,
               finalResponse,
             },
+          });
+          void recordAnalyticsEvent({
+            context: {
+              userId: session.userId,
+              userSessionId: session.userSessionId,
+              isAuthenticated: session.isAuthenticated,
+            },
+            event: {
+              eventName: "run_completed",
+              source: "agent",
+              searchId: resolvedSearchId,
+              runId: searchRunId,
+              iterationIndex: Math.max(0, state.iteration),
+              properties: {
+                runDurationMs: Date.now() - runStartedAtMs,
+                stopReason: state.stopReason,
+                totalScoredPosts: state.scoringResults?.rankedLeads?.length ?? 0,
+                totalHqPosts: state.scoringResults?.highQualityLeadsCount ?? 0,
+                averageScore: state.scoringResults?.avgScore ?? 0,
+                timeToFirstHqPostMs,
+                finalTaskComplete: state.taskComplete,
+              },
+            },
+            bestEffort: true,
           });
           controller.enqueue(encoder.encode(line({ type: "final", payload })));
         });

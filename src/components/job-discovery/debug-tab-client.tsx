@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import type { DebugRunOutput } from "@/lib/types/api";
 import { readApiErrorMessage } from "@/lib/client/api-error";
 import { summarizeUiError } from "@/lib/client/error-presentation";
+import { trackAnalyticsEvent } from "@/lib/client/analytics-events";
 import { AgentGraphDiagram } from "@/components/job-discovery/agent-graph-diagram";
 import { Check, Copy, Pause, Play, SkipBack, SkipForward, X } from "lucide-react";
 import { formatLeadLocationDisplay } from "@/lib/location/display";
@@ -172,6 +173,7 @@ type PostFeedRow = {
   lead: FinalLeadCard;
   mergeKey: string | null;
   runContextLabel: string | null;
+  runContextSearchRunId: number | null;
   showRunContextBadge: boolean;
   leadIdentityKey: string | null;
   canonicalUrlKey: string | null;
@@ -924,6 +926,79 @@ export function DebugTabClient({
         : `${DELETE_CONFIRM_PREFERENCE_KEY_PREFIX}:guest`,
     [userId],
   );
+  const lastFiltersAnalyticsRef = React.useRef<{
+    filters: PostFeedFilterState;
+    sortMode: PostFeedSortMode;
+  } | null>(null);
+
+  const trackClientEvent = React.useCallback(
+    (event: Parameters<typeof trackAnalyticsEvent>[0]) => {
+      void trackAnalyticsEvent(event);
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    const previous = lastFiltersAnalyticsRef.current;
+    const current = {
+      filters: postFeedAppliedFilters,
+      sortMode: postFeedSortMode,
+    };
+    if (!previous) {
+      lastFiltersAnalyticsRef.current = current;
+      return;
+    }
+
+    const changedKeys: string[] = [];
+    const filterKeys: Array<keyof PostFeedFilterState> = [
+      "role",
+      "location",
+      "recency",
+      "employmentType",
+      "workMode",
+      "posterType",
+      "matchStrength",
+      "source",
+      "status",
+      "newOnly",
+    ];
+    for (const key of filterKeys) {
+      if (previous.filters[key] !== postFeedAppliedFilters[key]) {
+        changedKeys.push(key);
+      }
+    }
+    if (previous.sortMode !== postFeedSortMode) {
+      changedKeys.push("sortMode");
+    }
+    if (changedKeys.length === 0) return;
+
+    lastFiltersAnalyticsRef.current = current;
+    const activeFilterCount = filterKeys.reduce((count, key) => {
+      const value = postFeedAppliedFilters[key];
+      if (key === "role" || key === "location") {
+        return typeof value === "string" && value.trim().length > 0 ? count + 1 : count;
+      }
+      return value !== "any" ? count + 1 : count;
+    }, 0);
+
+    const timeoutId = window.setTimeout(() => {
+      trackClientEvent({
+        eventName: "filters_changed",
+        source: "client",
+        properties: {
+          view: mode === "agent" ? "agent" : "post_feed",
+          changedKeys,
+          activeFilterCount,
+          sortMode: postFeedSortMode,
+          matchStrengthFilter: postFeedAppliedFilters.matchStrength,
+          sourceFilter: postFeedAppliedFilters.source,
+          statusFilter: postFeedAppliedFilters.status,
+        },
+      });
+    }, 200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [mode, postFeedAppliedFilters, postFeedSortMode, trackClientEvent]);
 
   React.useEffect(() => {
     if (isRunning || lastRunNewLeadCount == null) return;
@@ -978,6 +1053,29 @@ export function DebugTabClient({
       });
     },
     [],
+  );
+
+  const onPostStatusChange = React.useCallback(
+    (row: PostFeedRow, nextStatus: PostReviewStatus) => {
+      const previousStatus = coercePostReviewStatus(postFeedStatuses[row.statusStorageKey]);
+      setPostFeedStatus(row.statusStorageKey, nextStatus);
+      trackClientEvent({
+        eventName: "status_changed",
+        source: "client",
+        runId: row.runContextSearchRunId ?? undefined,
+        leadId:
+          typeof row.lead.leadId === "number" && row.lead.leadId > 0
+            ? row.lead.leadId
+            : undefined,
+        properties: {
+          previousStatus,
+          newStatus: nextStatus,
+          score: row.score,
+          sourceBadge: row.sourceSignal,
+        },
+      });
+    },
+    [postFeedStatuses, setPostFeedStatus, trackClientEvent],
   );
 
   const clearResumePersonalization = React.useCallback(() => {
@@ -2522,6 +2620,8 @@ export function DebugTabClient({
       const runContextLabel = runContext
         ? `From search: ${runContext.role} · ${runContext.location}`
         : null;
+      const runContextSearchRunId =
+        runContext && typeof runContext.searchRunId === "number" ? runContext.searchRunId : null;
       const showRunContextBadge = Boolean(runContextLabel);
       const provenanceDetails = [
         sourceSignal
@@ -2568,6 +2668,7 @@ export function DebugTabClient({
         lead,
         mergeKey,
         runContextLabel,
+        runContextSearchRunId,
         showRunContextBadge,
         leadIdentityKey,
         canonicalUrlKey,
@@ -3024,6 +3125,22 @@ export function DebugTabClient({
 
       setMessageErrorByRow((prev) => ({ ...prev, [row.key]: null }));
       setMessageGeneratingByRow((prev) => ({ ...prev, [row.key]: true }));
+      const startedAtMs = Date.now();
+      trackClientEvent({
+        eventName: "generate_message_clicked",
+        source: "client",
+        runId: row.runContextSearchRunId ?? undefined,
+        leadId:
+          typeof row.lead.leadId === "number" && row.lead.leadId > 0
+            ? row.lead.leadId
+            : undefined,
+        properties: {
+          score: row.score,
+          hasResume: Boolean(resumeRawText),
+          authorType: row.authorTypeLabel,
+          trigger: force ? "retry" : "initial",
+        },
+      });
       try {
         const res = await fetch("/api/messages/generate", {
           method: "POST",
@@ -3068,17 +3185,51 @@ export function DebugTabClient({
         }
 
         setGeneratedMessagesByRow((prev) => ({ ...prev, [row.key]: message }));
+        trackClientEvent({
+          eventName: "message_generation_completed",
+          source: "client",
+          runId: row.runContextSearchRunId ?? undefined,
+          leadId:
+            typeof row.lead.leadId === "number" && row.lead.leadId > 0
+              ? row.lead.leadId
+              : undefined,
+          properties: {
+            latencyMs: Date.now() - startedAtMs,
+            trigger: force ? "retry" : "initial",
+          },
+        });
       } catch (err) {
         const message = summarizeUiError({
           source: "message_generation",
           rawMessage: err instanceof Error ? err.message : "Failed to generate message",
         });
         setMessageErrorByRow((prev) => ({ ...prev, [row.key]: message }));
+        trackClientEvent({
+          eventName: "message_generation_failed",
+          source: "client",
+          runId: row.runContextSearchRunId ?? undefined,
+          leadId:
+            typeof row.lead.leadId === "number" && row.lead.leadId > 0
+              ? row.lead.leadId
+              : undefined,
+          properties: {
+            latencyMs: Date.now() - startedAtMs,
+            trigger: force ? "retry" : "initial",
+            errorCode: err instanceof Error ? err.name : "unknown_error",
+          },
+        });
       } finally {
         setMessageGeneratingByRow((prev) => ({ ...prev, [row.key]: false }));
       }
     },
-    [generatedMessagesByRow, messageGeneratingByRow, role, resumeRawText, resumeSenderName],
+    [
+      generatedMessagesByRow,
+      messageGeneratingByRow,
+      role,
+      resumeRawText,
+      resumeSenderName,
+      trackClientEvent,
+    ],
   );
 
   const onCopyMessageForRow = React.useCallback(
@@ -3517,6 +3668,20 @@ export function DebugTabClient({
 
   async function startRun() {
     if (isRunning) return;
+    trackClientEvent({
+      eventName: "search_submitted",
+      source: "client",
+      properties: {
+        role: role.trim(),
+        location: location.trim(),
+        locationStrict: locationIsHardFilter,
+        recency: recencyPreference,
+        employmentType: employmentType || null,
+        maxIterations,
+        targetHq: 20,
+        resumeAttached: Boolean(resumeRawText),
+      },
+    });
     // Enter running state immediately on click; do not block on saved-feed sync.
     setIsRunning(true);
     void loadSavedFeed({ force: true, authKey: userId ?? "guest", reason: "run_start" });
@@ -4512,7 +4677,7 @@ export function DebugTabClient({
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {visiblePostFeedRows.map((row) => (
+                    {visiblePostFeedRows.map((row, visibleIndex) => (
                       <PostCard
                         key={row.key}
                         title={row.displayRoleTitle}
@@ -4539,6 +4704,47 @@ export function DebugTabClient({
                         sourceBadge={row.sourceSignal}
                         isNew={row.isNew}
                         postUrl={row.viewPostUrl}
+                        onViewed={() =>
+                          trackClientEvent({
+                            eventName: "post_viewed",
+                            source: "client",
+                            runId: row.runContextSearchRunId ?? undefined,
+                            leadId:
+                              typeof row.lead.leadId === "number" && row.lead.leadId > 0
+                                ? row.lead.leadId
+                                : undefined,
+                            properties: {
+                              sourceBadge: row.freshness,
+                              positionIndex: visibleIndex,
+                              score: row.score,
+                              qualityTier: row.lead.qualityBadge ?? null,
+                              isNewTagged: row.isNew,
+                            },
+                          })
+                        }
+                        onExternalPostClick={() =>
+                          trackClientEvent({
+                            eventName: "external_post_clicked",
+                            source: "client",
+                            runId: row.runContextSearchRunId ?? undefined,
+                            leadId:
+                              typeof row.lead.leadId === "number" && row.lead.leadId > 0
+                                ? row.lead.leadId
+                                : undefined,
+                            properties: {
+                              score: row.score,
+                              sourceBadge: row.freshness,
+                              domain:
+                                (() => {
+                                  try {
+                                    return row.viewPostUrl ? new URL(row.viewPostUrl).hostname : null;
+                                  } catch {
+                                    return null;
+                                  }
+                                })(),
+                            },
+                          })
+                        }
                         selectedLocation={location}
                         onGenerateMessage={() => void onGenerateMessageForRow(row)}
                         onRegenerateMessage={() =>
@@ -4555,9 +4761,7 @@ export function DebugTabClient({
                         onOpenMessageDrawer={() => setMessageDrawerRowKey(row.key)}
                         showResumeNudge={!resumeRawText}
                         status={coercePostReviewStatus(postFeedStatuses[row.statusStorageKey])}
-                        onStatusChange={(nextStatus) =>
-                          setPostFeedStatus(row.statusStorageKey, nextStatus)
-                        }
+                        onStatusChange={(nextStatus) => onPostStatusChange(row, nextStatus)}
                         onRequestDeleteFromFeed={() => onRequestDeletePostFromFeed(row)}
                         isDeleting={Boolean(deletingFeedRowKeys[row.key])}
                         canDelete={

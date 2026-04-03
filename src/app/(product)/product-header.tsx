@@ -15,6 +15,11 @@ export function ProductHeader() {
   const headerRef = React.useRef<HTMLElement | null>(null);
   const [headerOffsetPx, setHeaderOffsetPx] = React.useState(0);
   const { mode: activeView, setMode } = useProductViewMode();
+  const activeTabIndex = React.useMemo(() => {
+    if (activeView === "post-feed") return 0;
+    if (activeView === "agent") return 1;
+    return 2;
+  }, [activeView]);
   const clerkEnabled = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
   React.useEffect(() => {
@@ -91,16 +96,14 @@ export function ProductHeader() {
           <div
             role="tablist"
             aria-label="View mode"
-            className="relative grid h-10 grid-cols-2 items-center rounded-full border border-[var(--intent-muted-border)] bg-muted p-1"
+            className="relative grid h-10 grid-cols-3 items-center rounded-full border border-[var(--intent-muted-border)] bg-muted p-1"
           >
             <span
               aria-hidden
               className={cn(
-                "pointer-events-none absolute bottom-1 left-1 top-1 w-[calc(50%-0.25rem)] rounded-full border border-black bg-black shadow-[0_1px_2px_rgba(0,0,0,0.06)] transition-transform duration-300 ease-out",
-                activeView === "agent"
-                  ? "translate-x-[calc(100%+0.25rem)]"
-                  : "translate-x-0",
+                "pointer-events-none absolute left-1 top-1 h-8 w-[calc((100%_-_0.5rem)/3)] rounded-full border border-black bg-black shadow-[0_1px_2px_rgba(0,0,0,0.06)] transition-transform duration-300 ease-out",
               )}
+              style={{ transform: `translateX(${activeTabIndex * 100}%)` }}
             />
             <button
               type="button"
@@ -108,10 +111,10 @@ export function ProductHeader() {
               aria-selected={activeView === "post-feed"}
               onClick={() => setMode("post-feed")}
               className={cn(
-                "relative z-10 flex h-8 min-w-[112px] items-center justify-center rounded-full px-4 text-sm font-medium transition-colors duration-200",
+                "relative z-10 flex h-8 min-w-[104px] items-center justify-center rounded-full px-3 text-sm font-medium transition-colors duration-200",
                 activeView === "post-feed"
                   ? "text-white"
-                  : "text-muted-foreground hover:bg-background hover:text-foreground",
+                  : "text-foreground/70 hover:bg-background hover:text-foreground",
               )}
             >
               Post Feed
@@ -122,13 +125,27 @@ export function ProductHeader() {
               aria-selected={activeView === "agent"}
               onClick={() => setMode("agent")}
               className={cn(
-                "relative z-10 flex h-8 min-w-[112px] items-center justify-center rounded-full px-4 text-sm font-medium transition-colors duration-200",
+                "relative z-10 flex h-8 min-w-[104px] items-center justify-center rounded-full px-3 text-sm font-medium transition-colors duration-200",
                 activeView === "agent"
                   ? "text-white"
-                  : "text-muted-foreground hover:bg-background hover:text-foreground",
+                  : "text-foreground/70 hover:bg-background hover:text-foreground",
               )}
             >
               Agent View
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeView === "analytics"}
+              onClick={() => setMode("analytics")}
+              className={cn(
+                "relative z-10 flex h-8 min-w-[104px] items-center justify-center rounded-full px-3 text-sm font-medium transition-colors duration-200",
+                activeView === "analytics"
+                  ? "text-white"
+                  : "text-foreground/70 hover:bg-background hover:text-foreground",
+              )}
+            >
+              Analytics
             </button>
           </div>
         </nav>

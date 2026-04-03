@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AnalyticsEventsBatchInputSchema,
   HistoryQuerySchema,
   LeadEventInputSchema,
   LeadFeedbackInputSchema,
@@ -52,6 +53,26 @@ describe("api contracts", () => {
     expect(parsed.limit).toBe(20);
   });
 
+  it("accepts analytics events batch payload", () => {
+    const parsed = AnalyticsEventsBatchInputSchema.parse({
+      events: [
+        {
+          eventName: "search_submitted",
+          source: "client",
+          properties: {
+            role: "Product Manager",
+            location: "Seattle",
+            locationStrict: true,
+            recency: "past-week",
+            maxIterations: 2,
+          },
+        },
+      ],
+    });
+    expect(parsed.events).toHaveLength(1);
+    expect(parsed.events[0]?.eventName).toBe("search_submitted");
+  });
+
   it("keeps polling-friendly run envelope shape", () => {
     const payload = SearchRunEnvelopeSchema.parse({
       runId: 1,
@@ -96,4 +117,3 @@ describe("api contracts", () => {
     expect(payload.result?.runId).toBe(1);
   });
 });
-

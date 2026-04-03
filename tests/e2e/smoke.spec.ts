@@ -95,3 +95,73 @@ test("main job discovery UX smoke flow", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Open Lead/i })).toBeVisible();
 });
 
+test("analytics tab navigation smoke", async ({ page }) => {
+  await page.route("**/api/post-feed/saved", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        data: { items: [] },
+      }),
+    });
+  });
+
+  await page.route("**/api/analytics?range=*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        data: {
+          range: "30d",
+          generatedAt: new Date().toISOString(),
+          overview: {
+            metrics: [],
+            runTrend: [],
+            sourceMix: [],
+          },
+          productUser: {
+            metrics: [],
+            topRoleLocations: [],
+            engagementRates: [],
+          },
+          feedQuality: {
+            metrics: [],
+            qualityBadgeDistribution: [],
+            fieldCompleteness: [],
+          },
+          agentSystem: {
+            metrics: [],
+            plannerModeDistribution: [],
+            stopReasonDistribution: [],
+            queryStrategyMix: [],
+            runDurationBuckets: [],
+            queryVolumeTrend: [],
+            nodeLatencyMock: [],
+          },
+          experiments: {
+            metrics: [],
+            variants: [],
+            notes: "mock",
+          },
+          provenance: {
+            real: [],
+            mock: [],
+            mixed: [],
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/home?view=post-feed");
+  const guestButton = page.getByRole("button", { name: /Continue as guest/i });
+  if (await guestButton.isVisible().catch(() => false)) {
+    await guestButton.click();
+  }
+
+  await page.getByRole("tab", { name: "Analytics" }).click();
+  await expect(page).toHaveURL(/\/home\?view=analytics/);
+  await expect(page.getByRole("heading", { name: "Analytics" })).toBeVisible();
+});

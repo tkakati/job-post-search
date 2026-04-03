@@ -100,6 +100,127 @@ export const HistoryResponseSchema = z.object({
   items: z.array(HistoryItemSchema),
 });
 
+export const AnalyticsRangeSchema = z.enum(["7d", "30d", "90d"]);
+
+export const AnalyticsQuerySchema = z.object({
+  range: AnalyticsRangeSchema.default("30d"),
+});
+
+export const AnalyticsEventNameSchema = z.enum([
+  "search_submitted",
+  "filters_changed",
+  "run_started",
+  "iteration_completed",
+  "query_generated",
+  "retrieval_completed",
+  "extraction_completed",
+  "scoring_completed",
+  "post_viewed",
+  "external_post_clicked",
+  "generate_message_clicked",
+  "status_changed",
+  "analytics_tab_viewed",
+  "run_completed",
+  "message_generation_completed",
+  "message_generation_failed",
+]);
+
+export const AnalyticsEventSourceSchema = z.enum(["client", "api", "agent"]);
+
+export const AnalyticsEventInputSchema = z.object({
+  eventName: AnalyticsEventNameSchema,
+  source: AnalyticsEventSourceSchema,
+  occurredAt: z.string().datetime().optional(),
+  searchId: z.string().min(1).max(120).optional(),
+  runId: z.number().int().positive().optional(),
+  iterationIndex: z.number().int().nonnegative().optional(),
+  queryId: z.string().min(1).max(160).optional(),
+  leadId: z.number().int().positive().optional(),
+  properties: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const AnalyticsEventsBatchInputSchema = z.object({
+  events: z.array(AnalyticsEventInputSchema).min(1).max(50),
+});
+
+const AnalyticsMetricSourceSchema = z.enum(["real", "mock", "mixed"]);
+const AnalyticsMetricUnitSchema = z.enum(["count", "percent", "ms", "ratio"]);
+
+const AnalyticsMetricSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  unit: AnalyticsMetricUnitSchema,
+  source: AnalyticsMetricSourceSchema,
+  global: z.object({
+    value: z.number(),
+    prevValue: z.number().nullable(),
+  }),
+  mine: z.object({
+    value: z.number(),
+    prevValue: z.number().nullable(),
+  }),
+});
+
+const AnalyticsTimePointSchema = z.object({
+  date: z.string().min(1),
+  global: z.number(),
+  mine: z.number(),
+});
+
+const AnalyticsBreakdownItemSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  value: z.number(),
+  source: AnalyticsMetricSourceSchema,
+});
+
+const AnalyticsRankedItemSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  value: z.number(),
+  source: AnalyticsMetricSourceSchema,
+  subLabel: z.string().nullable().optional(),
+});
+
+export const AnalyticsResponseSchema = z.object({
+  range: AnalyticsRangeSchema,
+  generatedAt: z.string().datetime(),
+  overview: z.object({
+    metrics: z.array(AnalyticsMetricSchema),
+    runTrend: z.array(AnalyticsTimePointSchema),
+    sourceMix: z.array(AnalyticsBreakdownItemSchema),
+  }),
+  productUser: z.object({
+    metrics: z.array(AnalyticsMetricSchema),
+    topRoleLocations: z.array(AnalyticsRankedItemSchema),
+    engagementRates: z.array(AnalyticsBreakdownItemSchema),
+  }),
+  feedQuality: z.object({
+    metrics: z.array(AnalyticsMetricSchema),
+    qualityBadgeDistribution: z.array(AnalyticsBreakdownItemSchema),
+    fieldCompleteness: z.array(AnalyticsBreakdownItemSchema),
+  }),
+  agentSystem: z.object({
+    metrics: z.array(AnalyticsMetricSchema),
+    plannerModeDistribution: z.array(AnalyticsBreakdownItemSchema),
+    stopReasonDistribution: z.array(AnalyticsBreakdownItemSchema),
+    queryStrategyMix: z.array(AnalyticsBreakdownItemSchema),
+    runDurationBuckets: z.array(AnalyticsBreakdownItemSchema),
+    queryVolumeTrend: z.array(AnalyticsTimePointSchema),
+    nodeLatencyMock: z.array(AnalyticsBreakdownItemSchema),
+  }),
+  experiments: z.object({
+    metrics: z.array(AnalyticsMetricSchema),
+    variants: z.array(AnalyticsBreakdownItemSchema),
+    notes: z.string().min(1),
+  }),
+  provenance: z.object({
+    real: z.array(z.string().min(1)),
+    mock: z.array(z.string().min(1)),
+    mixed: z.array(z.string().min(1)),
+  }),
+});
+
 export const SavedPostFeedLeadSchema = LeadCardViewModelSchema.extend({
   identityKey: z.string().nullable().optional(),
   workMode: z.enum(["onsite", "hybrid", "remote"]).nullable().optional(),

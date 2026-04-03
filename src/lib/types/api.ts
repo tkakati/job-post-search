@@ -118,3 +118,117 @@ export type DebugRunOutput = {
     finalResponse: unknown | null;
   };
 };
+
+export type AnalyticsRange = "7d" | "30d" | "90d";
+export type AnalyticsMetricSource = "real" | "mock" | "mixed";
+
+export type AnalyticsMetric = {
+  id: string;
+  label: string;
+  unit: "count" | "percent" | "ms" | "ratio";
+  source: AnalyticsMetricSource;
+  global: {
+    value: number;
+    prevValue: number | null;
+  };
+  mine: {
+    value: number;
+    prevValue: number | null;
+  };
+};
+
+export type AnalyticsTimePoint = {
+  date: string;
+  global: number;
+  mine: number;
+};
+
+export type AnalyticsBreakdownItem = {
+  id: string;
+  label: string;
+  value: number;
+  source: AnalyticsMetricSource;
+};
+
+export type AnalyticsRankedItem = {
+  id: string;
+  label: string;
+  value: number;
+  source: AnalyticsMetricSource;
+  subLabel?: string | null;
+};
+
+export type AnalyticsResponse = {
+  range: AnalyticsRange;
+  generatedAt: string;
+  overview: {
+    metrics: AnalyticsMetric[];
+    runTrend: AnalyticsTimePoint[];
+    sourceMix: AnalyticsBreakdownItem[];
+  };
+  productUser: {
+    metrics: AnalyticsMetric[];
+    topRoleLocations: AnalyticsRankedItem[];
+    engagementRates: AnalyticsBreakdownItem[];
+  };
+  feedQuality: {
+    metrics: AnalyticsMetric[];
+    qualityBadgeDistribution: AnalyticsBreakdownItem[];
+    fieldCompleteness: AnalyticsBreakdownItem[];
+  };
+  agentSystem: {
+    metrics: AnalyticsMetric[];
+    plannerModeDistribution: AnalyticsBreakdownItem[];
+    stopReasonDistribution: AnalyticsBreakdownItem[];
+    queryStrategyMix: AnalyticsBreakdownItem[];
+    runDurationBuckets: AnalyticsBreakdownItem[];
+    queryVolumeTrend: AnalyticsTimePoint[];
+    nodeLatencyMock: AnalyticsBreakdownItem[];
+  };
+  experiments: {
+    metrics: AnalyticsMetric[];
+    variants: AnalyticsBreakdownItem[];
+    notes: string;
+  };
+  provenance: {
+    real: string[];
+    mock: string[];
+    mixed: string[];
+  };
+};
+
+export type AnalyticsEventName =
+  | "search_submitted"
+  | "filters_changed"
+  | "run_started"
+  | "iteration_completed"
+  | "query_generated"
+  | "retrieval_completed"
+  | "extraction_completed"
+  | "scoring_completed"
+  | "post_viewed"
+  | "external_post_clicked"
+  | "generate_message_clicked"
+  | "status_changed"
+  | "analytics_tab_viewed"
+  | "run_completed"
+  | "message_generation_completed"
+  | "message_generation_failed";
+
+export type AnalyticsEventSource = "client" | "api" | "agent";
+
+export type AnalyticsEventInput = {
+  eventName: AnalyticsEventName;
+  source: AnalyticsEventSource;
+  occurredAt?: string;
+  searchId?: string;
+  runId?: number;
+  iterationIndex?: number;
+  queryId?: string;
+  leadId?: number;
+  properties?: Record<string, unknown>;
+};
+
+export type AnalyticsEventsBatchInput = {
+  events: AnalyticsEventInput[];
+};

@@ -5,6 +5,7 @@ import {
   StartSearchRunInputSchema,
 } from "@/lib/schemas/api";
 import { ensureUserSessionContext, readOptionalClerkUserId } from "@/lib/api/session";
+import { recordAnalyticsEvents, resolveSearchIdForRun } from "@/lib/api/analytics-events";
 import { startSearchRun } from "@/lib/api/search-runs";
 import { apiError, apiOk } from "@/lib/api/response";
 import { logger } from "@/lib/observability/logger";
@@ -38,6 +39,46 @@ export async function POST(req: Request) {
 
     const payload = SearchRunEnvelopeSchema.parse(envelope);
     const status = payload.status === "failed" ? 500 : 200;
+    if (payload.runId > 0) {
+      const searchId =
+        (await resolveSearchIdForRun(payload.runId)) ??
+        `run:${payload.runId}:${session.userSessionId}:${parsed.data.role}:${parsed.data.location}`;
+      void recordAnalyticsEvents({
+        context: {
+          userId: session.userId,
+          userSessionId: session.userSessionId,
+          isAuthenticated: session.isAuthenticated,
+        },
+        events: [
+          {
+            eventName: "search_submitted",
+            source: "api",
+            searchId,
+            runId: payload.runId,
+            properties: {
+              role: parsed.data.role,
+              location: parsed.data.location,
+              locationStrict: parsed.data.locationIsHardFilter ?? false,
+              recency: parsed.data.recencyPreference,
+              employmentType: parsed.data.employmentType ?? null,
+            },
+          },
+          {
+            eventName: "run_started",
+            source: "api",
+            searchId,
+            runId: payload.runId,
+            properties: {
+              role: parsed.data.role,
+              location: parsed.data.location,
+              locationStrict: parsed.data.locationIsHardFilter ?? false,
+              recency: parsed.data.recencyPreference,
+              employmentType: parsed.data.employmentType ?? null,
+            },
+          },
+        ],
+      });
+    }
     logger.info("search_run_created", {
       runId: payload.runId,
       status: payload.status,

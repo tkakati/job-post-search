@@ -59,6 +59,8 @@ export type PostCardProps = {
   onCopyMessage?: () => void;
   isMessageCopied?: boolean;
   onOpenMessageDrawer?: () => void;
+  onViewed?: () => void;
+  onExternalPostClick?: () => void;
   showResumeNudge?: boolean;
   status?: PostReviewStatus;
   onStatusChange?: (status: PostReviewStatus) => void;
@@ -231,6 +233,8 @@ export function PostCard({
   onCopyMessage,
   isMessageCopied,
   onOpenMessageDrawer,
+  onViewed,
+  onExternalPostClick,
   showResumeNudge = false,
   status = "not_reviewed",
   onStatusChange,
@@ -242,6 +246,7 @@ export function PostCard({
   isPostedByCompany = false,
 }: PostCardProps) {
   const cardRef = React.useRef<HTMLDivElement | null>(null);
+  const hasTrackedViewRef = React.useRef(false);
   const [isMessagePanelOpen, setIsMessagePanelOpen] = React.useState(false);
   const selectedLocationNormalized = selectedLocation?.trim().toLowerCase() ?? "";
   const safePostUrl = React.useMemo(() => toHttpUrlOrNull(postUrl), [postUrl]);
@@ -309,6 +314,33 @@ export function PostCard({
     keepCardInView();
   }, [isMessagePanelOpen, isMessageGenerating, messageDraft, messageError, keepCardInView]);
 
+  React.useEffect(() => {
+    if (!onViewed) return;
+    const node = cardRef.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      if (!hasTrackedViewRef.current) {
+        hasTrackedViewRef.current = true;
+        onViewed();
+      }
+      return;
+    }
+    hasTrackedViewRef.current = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (hasTrackedViewRef.current) return;
+        const entry = entries[0];
+        if (!entry || !entry.isIntersecting || entry.intersectionRatio < 0.55) return;
+        hasTrackedViewRef.current = true;
+        onViewed();
+        observer.disconnect();
+      },
+      { threshold: [0.55] },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onViewed, title, postUrl]);
+
   return (
     <Card
       ref={cardRef}
@@ -347,6 +379,7 @@ export function PostCard({
                 className="inline-flex shrink-0 items-center text-muted-foreground transition-colors hover:text-foreground"
                 aria-label="Open LinkedIn post"
                 title="Open LinkedIn post"
+                onClick={onExternalPostClick}
               >
                 <ExternalLink className="h-3.5 w-3.5" />
               </a>
