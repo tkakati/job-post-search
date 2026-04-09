@@ -1199,7 +1199,10 @@ export function DebugTabClient({
   }): Promise<FinalLeadCard[] | null> => {
     if (!options?.force && hasLoadedSavedFeedRef.current) return null;
     try {
-      const response = await fetch("/api/post-feed/saved", {
+      const savedFeedUrl = `/api/post-feed/saved?recencyPreference=${encodeURIComponent(
+        recencyPreference,
+      )}`;
+      const response = await fetch(savedFeedUrl, {
         method: "GET",
         credentials: "same-origin",
         cache: "no-store",
@@ -1266,7 +1269,7 @@ export function DebugTabClient({
       // Ignore saved-feed bootstrap failures to keep the run UI usable.
       return null;
     }
-  }, [userId]);
+  }, [recencyPreference, userId]);
 
   React.useEffect(() => {
     if (initialSavedFeedItems.length > 0) return;

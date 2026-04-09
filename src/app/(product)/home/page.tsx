@@ -17,6 +17,7 @@ export default async function HomePage() {
       const savedFeed = await getSavedPostFeed({
         sessionScopeIds: session.sessionScopeIds,
         limit: 300,
+        recencyPreference: "past-week",
       });
       initialSavedFeedItems = savedFeed.items;
     } catch {

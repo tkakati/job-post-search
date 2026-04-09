@@ -22,6 +22,7 @@ import { z } from "zod";
 import { canonicalLeadIdentity } from "@/lib/utils/lead-identity";
 import { daysToRecencyPreference, recencyPreferenceToDays } from "@/lib/utils/recency";
 import { qualityBadgeFromScore } from "@/lib/scoring/thresholds";
+import type { RecencyPreference } from "@/lib/types/contracts";
 
 type SearchRunEnvelope = z.infer<typeof SearchRunEnvelopeSchema>;
 type SearchRunResult = z.infer<typeof SearchRunResultSchema>;
@@ -910,9 +911,13 @@ export async function getRecentHistory(input: {
 export async function getSavedPostFeed(input: {
   sessionScopeIds: string[];
   limit?: number;
+  recencyPreference?: RecencyPreference;
 }): Promise<SavedPostFeedResponse> {
   const scopeIds = normalizeSessionScopeIds({ sessionScopeIds: input.sessionScopeIds });
   if (scopeIds.length === 0) return { items: [] };
+  const recencyPreference = input.recencyPreference ?? "past-week";
+  const recencyDays = recencyPreferenceToDays(recencyPreference);
+  const recencyCutoff = new Date(Date.now() - recencyDays * 24 * 60 * 60 * 1000);
 
   const db = dbClient();
   const hidden = await fetchHiddenLeadExclusions({ sessionScopeIds: scopeIds });
@@ -962,6 +967,8 @@ export async function getSavedPostFeed(input: {
     if (hidden.hiddenLeadIds.has(row.leadId)) continue;
     if (identityKey && hidden.hiddenIdentityKeys.has(identityKey)) continue;
     if (canonicalUrl && hidden.hiddenCanonicalUrls.has(canonicalUrl)) continue;
+    const leadRecencyDate = row.postedAt ?? row.shownAt;
+    if (leadRecencyDate < recencyCutoff) continue;
 
     const sourceMetadata =
       row.sourceMetadataJson && typeof row.sourceMetadataJson === "object"

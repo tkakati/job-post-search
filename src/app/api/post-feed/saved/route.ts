@@ -7,8 +7,17 @@ import { logger } from "@/lib/observability/logger";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const { searchParams } = new URL(request.url);
+    const requestedRecency = searchParams.get("recencyPreference");
+    const recencyPreference =
+      requestedRecency === "past-24h" ||
+      requestedRecency === "past-week" ||
+      requestedRecency === "past-month"
+        ? requestedRecency
+        : "past-week";
+
     const cookieStore = await cookies();
     const clerkUserId = await readOptionalClerkUserId();
     const session = await ensureUserSessionContext({
@@ -19,6 +28,7 @@ export async function GET() {
     const savedFeed = await getSavedPostFeed({
       sessionScopeIds: session.sessionScopeIds,
       limit: 300,
+      recencyPreference,
     });
 
     return apiOk(SavedPostFeedResponseSchema.parse(savedFeed));
