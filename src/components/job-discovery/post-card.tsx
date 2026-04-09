@@ -48,6 +48,7 @@ export type PostCardProps = {
   gateReason?: "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null;
   sourceBadge?: "retrieved" | "fresh" | "both" | null;
   isNew?: boolean;
+  isViewed?: boolean;
   postUrl?: string | null;
   selectedLocation?: string | null;
   onGenerateMessage?: () => void;
@@ -222,6 +223,7 @@ export function PostCard({
   finalScore100,
   sourceBadge,
   isNew,
+  isViewed = false,
   postUrl,
   selectedLocation,
   onGenerateMessage,
@@ -449,6 +451,14 @@ export function PostCard({
                 >
                   {newTag.label}
                 </Badge>
+            ) : null}
+            {isViewed ? (
+              <Badge
+                variant="secondary"
+                className={`h-5 px-1.5 text-[10px] font-semibold ${tagToneClassName("blue")}`}
+              >
+                Viewed
+              </Badge>
             ) : null}
             {matchTag ? (
               <div className="inline-flex items-center gap-1">

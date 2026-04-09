@@ -198,6 +198,7 @@ type PostFeedRow = {
   gatedToZero: boolean;
   gateReason: "hiring_intent_zero" | "employment_type_mismatch" | "hard_location_mismatch" | null;
   isNew: boolean;
+  isViewed: boolean;
   fullText: string | null;
   whyMatched: string[];
   provenanceDetails: string[];
@@ -860,6 +861,7 @@ export function DebugTabClient({
     initialSavedFeedSnapshot.deduped.length > 0,
   );
   const [runNewLeadKeys, setRunNewLeadKeys] = React.useState<Record<string, true>>({});
+  const [viewedFeedKeys, setViewedFeedKeys] = React.useState<Record<string, true>>({});
   const [postFeedStatuses, setPostFeedStatuses] = React.useState<Record<string, PostReviewStatus>>(
     {},
   );
@@ -2619,6 +2621,8 @@ export function DebugTabClient({
         canonicalUrl: lead.canonicalUrl ?? viewPostUrl,
       });
       const canonicalUrlKey = normalizeUrlForLookup(lead.canonicalUrl ?? viewPostUrl ?? "");
+      const viewedKey = mergeKey ?? canonicalUrlKey ?? statusStorageKey;
+      const isViewed = Boolean(viewedFeedKeys[viewedKey]);
       const runContext = mergeKey ? feedRunContextByMergeKey[mergeKey] : null;
       const runContextLabel = runContext
         ? `From search: ${runContext.role} · ${runContext.location}`
@@ -2696,6 +2700,7 @@ export function DebugTabClient({
         gatedToZero,
         gateReason,
         isNew,
+        isViewed,
         fullText,
         whyMatched,
         provenanceDetails,
@@ -2842,6 +2847,7 @@ export function DebugTabClient({
     resolveScoredLeadForRow,
     runStartedWithExistingFeed,
     runNewLeadKeys,
+    viewedFeedKeys,
   ]);
   const postFeedRowsByKey = React.useMemo(
     () => new Map(postFeedRows.map((row) => [row.key, row])),
@@ -3250,6 +3256,59 @@ export function DebugTabClient({
       }, 1800);
     },
     [generatedMessagesByRow],
+  );
+
+  const onExternalPostClickForRow = React.useCallback(
+    async (row: PostFeedRow) => {
+      const viewedKey = row.mergeKey ?? row.canonicalUrlKey ?? row.statusStorageKey;
+      setViewedFeedKeys((prev) => {
+        if (prev[viewedKey]) return prev;
+        return { ...prev, [viewedKey]: true };
+      });
+
+      trackClientEvent({
+        eventName: "external_post_clicked",
+        source: "client",
+        runId: row.runContextSearchRunId ?? undefined,
+        leadId:
+          typeof row.lead.leadId === "number" && row.lead.leadId > 0
+            ? row.lead.leadId
+            : undefined,
+        properties: {
+          score: row.score,
+          sourceBadge: row.freshness,
+          domain:
+            (() => {
+              try {
+                return row.viewPostUrl ? new URL(row.viewPostUrl).hostname : null;
+              } catch {
+                return null;
+              }
+            })(),
+        },
+      });
+
+      const leadId = row.lead.leadId;
+      if (typeof leadId !== "number" || !Number.isInteger(leadId) || leadId <= 0) return;
+      try {
+        await fetch(`/api/leads/${leadId}/events`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            eventType: "clicked",
+            searchRunId: row.runContextSearchRunId ?? undefined,
+            metadata: {
+              sourceBadge: row.freshness,
+              score: row.score,
+            },
+          }),
+        });
+      } catch {
+        // Best-effort only; do not block card interaction.
+      }
+    },
+    [trackClientEvent],
   );
 
   const executeDeletePostFromFeed = React.useCallback(async (row: PostFeedRow) => {
@@ -4706,6 +4765,7 @@ export function DebugTabClient({
                         gateReason={row.gateReason}
                         sourceBadge={row.sourceSignal}
                         isNew={row.isNew}
+                        isViewed={row.isViewed}
                         postUrl={row.viewPostUrl}
                         onViewed={() =>
                           trackClientEvent({
@@ -4725,29 +4785,7 @@ export function DebugTabClient({
                             },
                           })
                         }
-                        onExternalPostClick={() =>
-                          trackClientEvent({
-                            eventName: "external_post_clicked",
-                            source: "client",
-                            runId: row.runContextSearchRunId ?? undefined,
-                            leadId:
-                              typeof row.lead.leadId === "number" && row.lead.leadId > 0
-                                ? row.lead.leadId
-                                : undefined,
-                            properties: {
-                              score: row.score,
-                              sourceBadge: row.freshness,
-                              domain:
-                                (() => {
-                                  try {
-                                    return row.viewPostUrl ? new URL(row.viewPostUrl).hostname : null;
-                                  } catch {
-                                    return null;
-                                  }
-                                })(),
-                            },
-                          })
-                        }
+                        onExternalPostClick={() => void onExternalPostClickForRow(row)}
                         selectedLocation={location}
                         onGenerateMessage={() => void onGenerateMessageForRow(row)}
                         onRegenerateMessage={() =>
